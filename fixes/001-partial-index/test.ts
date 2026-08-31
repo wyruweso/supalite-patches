@@ -1,0 +1,121 @@
+// Asserts the CORRECT behaviour, so it fails on the published build by design.
+import { test, describe } from 'node:test'
+import assert from 'node:assert/strict'
+import { lite, newApp, post, pgrstCode, type LiteApp, type LiteConnection } from '../../test/harness.ts'
+
+const translate = (sql: string): Promise<string> => lite.translatePostgresDdl(sql)
+
+const USERS = [
+   'CREATE TABLE users (id int primary key, email text not null, deleted_at timestamptz);',
+   'CREATE UNIQUE INDEX users_live_email ON users (email) WHERE deleted_at IS NULL;',
+].join('\n')
+
+async function migrate(ddl: string): Promise<{ app: LiteApp; connection: LiteConnection }> {
+   const { app, connection }: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
+   await (await connection.createMigrator(ddl)).migrate()
+   return { app, connection }
+}
+
+async function indexSql(connection: LiteConnection, name: string): Promise<string> {
+   const result = (await connection.exec(`SELECT sql FROM sqlite_master WHERE type='index' AND name='${name}'`)) as {
+      rows: { sql: string }[]
+   }
+   return result.rows[0]?.sql ?? ''
+}
+
+describe('FIX-001 partial indexes keep their predicate', () => {
+   test('a partial UNIQUE index keeps its WHERE clause', async () => {
+      const out = await translate('CREATE UNIQUE INDEX u ON users (email) WHERE deleted_at IS NULL;')
+      assert.match(out, /CREATE UNIQUE INDEX u ON users \(email\)\s+WHERE deleted_at IS NULL/)
+   })
+
+   test('a plain partial index keeps its WHERE clause', async () => {
+      const out = await translate('CREATE INDEX p ON t (a) WHERE a > 0;')
+      assert.match(out, /CREATE INDEX p ON t \(a\)\s+WHERE a > 0/)
+   })
+
+   // The predicate goes through the ordinary expression visitor, so compound conditions work on
+   // their own. The line break inside AND is existing BoolExpr formatting, not this change.
+   test('a compound predicate survives, and so does the index direction', async () => {
+      const out = await translate('CREATE INDEX p ON t (a DESC) WHERE a > 0 AND b IS NOT NULL;')
+      assert.match(out, /\(a DESC\)/)
+      assert.match(out, /WHERE a > 0\s+AND b IS NOT NULL/)
+   })
+
+   test('an index without a predicate is untouched', async () => {
+      assert.equal((await translate('CREATE INDEX plain ON t (a);')).trim(), 'CREATE INDEX plain ON t (a);')
+   })
+
+   // The second path: the planner rebuilds CREATE INDEX from a structural model, so until that model
+   // had a place for the predicate, fixing translation changed nothing for a migration.
+   test('the predicate reaches SQLite through a migration', async () => {
+      const { connection } = await migrate(USERS)
+      assert.match(await indexSql(connection, 'users_live_email'), /WHERE\s+deleted_at IS NULL/)
+   })
+
+   // What it is all for: with a global constraint the database rejects a row Postgres accepts.
+   test('the soft-delete idiom accepts what Postgres accepts', async () => {
+      const { app } = await migrate(USERS)
+
+      const deleted = await post(app, '/rest/v1/users', { id: 1, email: 'a@b.co', deleted_at: '2024-01-01T00:00:00Z' })
+      assert.equal(deleted.status, 201, `PGRST code: ${pgrstCode(deleted)}`)
+
+      const reused = await post(app, '/rest/v1/users', { id: 2, email: 'a@b.co' })
+      assert.equal(reused.status, 201, `re-registering a soft-deleted address: ${pgrstCode(reused)}`)
+   })
+
+   test('a migration that only changes the predicate is noticed', async () => {
+      const table = 'CREATE TABLE notes (id int primary key, body text, archived boolean);\n'
+      const { connection } = await migrate(`${table}CREATE INDEX notes_body ON notes (body) WHERE archived = false;`)
+
+      await (
+         await connection.createMigrator(`${table}CREATE INDEX notes_body ON notes (body) WHERE body IS NOT NULL;`)
+      ).migrate()
+
+      assert.match(await indexSql(connection, 'notes_body'), /WHERE\s+body IS NOT NULL/)
+   })
+
+   // Reading the predicate back means telling the filter's WHERE apart from any other, and
+   // sqlite_schema keeps the statement roughly as written. These go in as raw SQL because the
+   // translator's quoting cannot produce them — and the reader still meets them in databases it did
+   // not write.
+   test('a WHERE inside the statement is not mistaken for the filter', async () => {
+      const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
+      await connection.exec('CREATE TABLE t (a int, note text)')
+      await connection.exec(`CREATE INDEX by_literal ON t (a) WHERE note = 'x WHERE y'`)
+      await connection.exec(`CREATE INDEX by_expression ON t ((note || ' WHERE ')) WHERE a > 0`)
+      await connection.exec(`CREATE INDEX by_comment ON t (a) /* WHERE not this */ WHERE a > 0`)
+
+      const found = new Map(
+         (await connection.introspect()).indexes.map((index: { name: string; where?: string | null }) => [
+            index.name,
+            index.where,
+         ]),
+      )
+      assert.equal(found.get('by_literal'), `note = 'x WHERE y'`)
+      assert.equal(found.get('by_expression'), 'a > 0')
+      assert.equal(found.get('by_comment'), 'a > 0')
+   })
+
+   test('an index whose name contains a quote keeps its predicate', async () => {
+      const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
+      await connection.exec('CREATE TABLE t (a int)')
+      await connection.exec('CREATE INDEX "strange""index" ON t (a) WHERE a > 0')
+
+      const index = (await connection.introspect()).indexes.find((i: { name: string }) => i.name === 'strange"index')
+      assert.equal(index?.where, 'a > 0')
+   })
+
+   // The predicate is compared as text, so the same condition written differently would plan a
+   // migration that changes nothing. It does not: both sides reach the model through the same parser,
+   // translator and introspection, which is what normalises them.
+   test('the same predicate written differently is not a change', async () => {
+      const table = 'CREATE TABLE t (a int, note text);\n'
+      const { connection } = await migrate(`${table}CREATE INDEX i ON t (a) WHERE a > 0;`)
+
+      const { diff } = (await (
+         await connection.createMigrator(`${table}CREATE INDEX i ON t (a) WHERE a>0;`)
+      ).diff()) as { diff: { has_changes: boolean } }
+      assert.equal(diff.has_changes, false)
+   })
+})

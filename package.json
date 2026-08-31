@@ -1,0 +1,34 @@
+{
+   "name": "supalite-patches",
+   "version": "1.0.0",
+   "private": true,
+   "type": "module",
+   "description": "Readable patches for @supabase/lite: five defect fixes and three unimplemented capabilities, applied to the published bundle.",
+   "scripts": {
+      "test": "node test/run.ts",
+      "build": "node apply.ts",
+      "install:patches": "node install.ts",
+      "uninstall:patches": "node install.ts --uninstall",
+      "typecheck": "tsc --noEmit",
+      "lint": "eslint .",
+      "format": "prettier --write .",
+      "verify": "npm run typecheck && npm run lint && npm run test:patcher && npm test",
+      "repro": "node repro.ts",
+      "test:patcher": "node --test test/patcher.test.ts"
+   },
+   "devDependencies": {
+      "@babel/generator": "^8.0.0",
+      "@babel/parser": "^8.0.0",
+      "@babel/traverse": "^8.0.4",
+      "@babel/types": "^8.0.4",
+      "@eslint/js": "^10.0.1",
+      "@supabase/lite": "0.9.0",
+      "@types/node": "^26.4.0",
+      "eslint": "^10.9.1",
+      "eslint-config-prettier": "^10.1.8",
+      "jose": "^6.1.0",
+      "prettier": "^3.9.6",
+      "typescript": "^5.9.3",
+      "typescript-eslint": "^8.69.0"
+   }
+}

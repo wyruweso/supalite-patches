@@ -1,0 +1,627 @@
+{
+   "select all": {
+      "body": [
+         {
+            "author_id": 1,
+            "id": 1,
+            "pages": 341,
+            "price": 9.99,
+            "published": "1974-01-01",
+            "title": "The Dispossessed"
+         },
+         {
+            "author_id": 1,
+            "id": 2,
+            "pages": 183,
+            "price": 7.5,
+            "published": "1968-01-01",
+            "title": "A Wizard of Earthsea"
+         },
+         {
+            "author_id": 2,
+            "id": 3,
+            "pages": null,
+            "price": 12,
+            "published": "1944-01-01",
+            "title": "Ficciones"
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "select projection": {
+      "body": [
+         {
+            "id": 1,
+            "title": "The Dispossessed"
+         },
+         {
+            "id": 2,
+            "title": "A Wizard of Earthsea"
+         },
+         {
+            "id": 3,
+            "title": "Ficciones"
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "select rename": {
+      "body": [
+         {
+            "book": 1,
+            "name": "The Dispossessed"
+         },
+         {
+            "book": 2,
+            "name": "A Wizard of Earthsea"
+         },
+         {
+            "book": 3,
+            "name": "Ficciones"
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "embed to-one": {
+      "body": [
+         {
+            "authors": {
+               "name": "Ursula"
+            },
+            "title": "The Dispossessed"
+         },
+         {
+            "authors": {
+               "name": "Ursula"
+            },
+            "title": "A Wizard of Earthsea"
+         },
+         {
+            "authors": {
+               "name": "Borges"
+            },
+            "title": "Ficciones"
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "embed to-many": {
+      "body": [
+         {
+            "reviews": [
+               {
+                  "stars": 5
+               },
+               {
+                  "stars": 4
+               }
+            ],
+            "title": "The Dispossessed"
+         },
+         {
+            "reviews": [],
+            "title": "A Wizard of Earthsea"
+         },
+         {
+            "reviews": [
+               {
+                  "stars": 5
+               }
+            ],
+            "title": "Ficciones"
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "embed spread": {
+      "body": [
+         {
+            "name": "Ursula",
+            "title": "The Dispossessed"
+         },
+         {
+            "name": "Ursula",
+            "title": "A Wizard of Earthsea"
+         },
+         {
+            "name": "Borges",
+            "title": "Ficciones"
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "embed nested": {
+      "body": [
+         {
+            "books": {
+               "authors": {
+                  "name": "Ursula"
+               },
+               "title": "The Dispossessed"
+            },
+            "stars": 5
+         },
+         {
+            "books": {
+               "authors": {
+                  "name": "Ursula"
+               },
+               "title": "The Dispossessed"
+            },
+            "stars": 4
+         },
+         {
+            "books": {
+               "authors": {
+                  "name": "Borges"
+               },
+               "title": "Ficciones"
+            },
+            "stars": 5
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "embed inner filtered": {
+      "body": [
+         {
+            "authors": {
+               "name": "Borges"
+            },
+            "title": "Ficciones"
+         }
+      ],
+      "contentRange": "0-0/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "filter in": {
+      "body": [
+         {
+            "id": 1
+         },
+         {
+            "id": 3
+         }
+      ],
+      "contentRange": "0-1/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "filter like": {
+      "body": [
+         {
+            "id": 2,
+            "title": "A Wizard of Earthsea"
+         }
+      ],
+      "contentRange": "0-0/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "filter ilike": {
+      "body": [
+         {
+            "id": 2,
+            "title": "A Wizard of Earthsea"
+         }
+      ],
+      "contentRange": "0-0/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "filter is null": {
+      "body": [
+         {
+            "id": 3
+         }
+      ],
+      "contentRange": "0-0/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "filter or": {
+      "body": [
+         {
+            "id": 1
+         },
+         {
+            "id": 3
+         }
+      ],
+      "contentRange": "0-1/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "filter regex glob-able": {
+      "body": [
+         {
+            "id": 2
+         }
+      ],
+      "contentRange": "0-0/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "order desc nullsfirst": {
+      "body": [
+         {
+            "id": 3,
+            "pages": null
+         },
+         {
+            "id": 1,
+            "pages": 341
+         },
+         {
+            "id": 2,
+            "pages": 183
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "limit offset": {
+      "body": [
+         {
+            "id": 2
+         },
+         {
+            "id": 3
+         }
+      ],
+      "contentRange": "1-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "view read": {
+      "body": [
+         {
+            "id": 1,
+            "pages": 341,
+            "title": "The Dispossessed"
+         },
+         {
+            "id": 2,
+            "pages": 183,
+            "title": "A Wizard of Earthsea"
+         },
+         {
+            "id": 3,
+            "pages": null,
+            "title": "Ficciones"
+         }
+      ],
+      "contentRange": "0-2/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "csv output": {
+      "body": "id,title\n1,\"The Dispossessed\"\n2,\"A Wizard of Earthsea\"\n3,Ficciones",
+      "contentRange": "0-2/*",
+      "contentType": "text/csv; charset=utf-8",
+      "status": 200
+   },
+   "single object": {
+      "body": {
+         "id": 1,
+         "title": "The Dispossessed"
+      },
+      "contentRange": "0-0/*",
+      "contentType": "application/vnd.pgrst.object+json; charset=utf-8",
+      "status": 200
+   },
+   "openapi root": {
+      "body": {
+         "basePath": "/",
+         "consumes": [
+            "application/json",
+            "application/vnd.pgrst.object+json;nulls=stripped",
+            "application/vnd.pgrst.object+json",
+            "text/csv"
+         ],
+         "info": {
+            "description": "",
+            "title": "standard public schema",
+            "version": "14.1"
+         },
+         "produces": [
+            "application/json",
+            "application/vnd.pgrst.object+json;nulls=stripped",
+            "application/vnd.pgrst.object+json",
+            "text/csv"
+         ],
+         "schemes": ["https"],
+         "swagger": "2.0"
+      },
+      "contentRange": null,
+      "contentType": "application/json",
+      "status": 200
+   },
+   "insert representation": {
+      "body": [
+         {
+            "body": "snap",
+            "book_id": 2,
+            "id": 50,
+            "stars": 3
+         }
+      ],
+      "contentRange": "*/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 201
+   },
+   "patch representation": {
+      "body": [
+         {
+            "body": "patched",
+            "book_id": 1,
+            "id": 1,
+            "stars": 5
+         }
+      ],
+      "contentRange": "0-0/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "delete representation": {
+      "body": [
+         {
+            "body": "good",
+            "book_id": 1,
+            "id": 2,
+            "stars": 4
+         }
+      ],
+      "contentRange": "*/*",
+      "contentType": "application/json; charset=utf-8",
+      "status": 200
+   },
+   "error unknown table": {
+      "body": {
+         "code": "PGRST205",
+         "details": null,
+         "hint": null,
+         "message": "Could not find the table 'nope' in the schema cache"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 404
+   },
+   "error unknown column": {
+      "body": {
+         "code": "SUP",
+         "details": null,
+         "hint": null,
+         "message": "Error: Failed to prepare statement: select \"nope\" from \"books\" limit ?"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 500
+   },
+   "error bad select": {
+      "body": {
+         "code": "PGRST100",
+         "details": "Expected identifier at position 3",
+         "hint": null,
+         "message": "Expected identifier at position 3"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 400
+   },
+   "error ragged batch": {
+      "body": {
+         "code": "PGRST102",
+         "details": null,
+         "hint": null,
+         "message": "All object keys must match"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 400
+   },
+   "error aggregate": {
+      "body": {
+         "code": "PGRST123",
+         "details": null,
+         "hint": null,
+         "message": "Use of aggregate functions is not allowed"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 400
+   },
+   "error bad accept": {
+      "body": {
+         "code": "PGRST107",
+         "details": null,
+         "hint": null,
+         "message": "None of these media types are available: application/xml"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 406
+   },
+   "error bad profile": {
+      "body": {
+         "code": "PGRST106",
+         "details": null,
+         "hint": "Only the following schemas are exposed: graphql_public, public, storage",
+         "message": "Invalid schema: other"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 406
+   },
+   "error rpc": {
+      "body": {
+         "code": "PGRST202",
+         "details": null,
+         "hint": null,
+         "message": "Could not find the function public.anything in the schema cache"
+      },
+      "contentRange": null,
+      "contentType": "application/json; charset=utf-8",
+      "status": 404
+   },
+   "auth settings": {
+      "body": {
+         "disable_signup": false,
+         "external": {
+            "anonymous_users": false,
+            "apple": false,
+            "azure": false,
+            "bitbucket": false,
+            "discord": false,
+            "email": true,
+            "facebook": false,
+            "figma": false,
+            "fly": false,
+            "github": false,
+            "gitlab": false,
+            "google": false,
+            "kakao": false,
+            "keycloak": false,
+            "linkedin": false,
+            "linkedin_oidc": false,
+            "notion": false,
+            "phone": false,
+            "slack": false,
+            "slack_oidc": false,
+            "snapchat": false,
+            "spotify": false,
+            "twitch": false,
+            "twitter": false,
+            "workos": false,
+            "zoom": false
+         },
+         "mailer_autoconfirm": true,
+         "phone_autoconfirm": false,
+         "saml_enabled": false,
+         "sms_provider": ""
+      },
+      "contentRange": null,
+      "contentType": "application/json",
+      "status": 200
+   },
+   "auth signup": {
+      "body": {
+         "access_token": "<jwt>",
+         "expires_at": "<exp>",
+         "expires_in": 3600,
+         "refresh_token": "<uuid>",
+         "token_type": "bearer",
+         "user": {
+            "app_metadata": {
+               "provider": "email",
+               "providers": ["email"]
+            },
+            "aud": "authenticated",
+            "created_at": "<ts>",
+            "email": "snap@b.co",
+            "email_confirmed_at": "<ts>",
+            "id": "<uuid>",
+            "identities": [
+               {
+                  "created_at": "<ts>",
+                  "email": "snap@b.co",
+                  "id": "<uuid>",
+                  "identity_data": {
+                     "email": "snap@b.co",
+                     "email_verified": true,
+                     "phone_verified": false,
+                     "sub": "<uuid>"
+                  },
+                  "identity_id": "<uuid>",
+                  "last_sign_in_at": "<ts>",
+                  "provider": "email",
+                  "updated_at": "<ts>",
+                  "user_id": "<uuid>"
+               }
+            ],
+            "is_anonymous": false,
+            "last_sign_in_at": "<ts>",
+            "phone": "",
+            "role": "authenticated",
+            "updated_at": "<ts>",
+            "user_metadata": {
+               "email": "snap@b.co",
+               "email_verified": true,
+               "phone_verified": false,
+               "sub": "<uuid>"
+            }
+         }
+      },
+      "contentRange": null,
+      "contentType": "application/json",
+      "status": 200
+   },
+   "auth bad password": {
+      "body": {
+         "code": 400,
+         "error_code": "invalid_credentials",
+         "msg": "Invalid login credentials"
+      },
+      "contentRange": null,
+      "contentType": "application/json",
+      "status": 400
+   },
+   "auth bad grant": {
+      "body": {
+         "code": 400,
+         "error_code": "invalid_credentials",
+         "msg": "unsupported_grant_type"
+      },
+      "contentRange": null,
+      "contentType": "application/json",
+      "status": 400
+   },
+   "auth user anonymous": {
+      "body": {
+         "code": 401,
+         "error_code": "no_authorization",
+         "msg": "This endpoint requires a valid Bearer token"
+      },
+      "contentRange": null,
+      "contentType": "application/json",
+      "status": 401
+   },
+   "auth unknown provider": {
+      "body": {
+         "code": 400,
+         "error_code": "validation_failed",
+         "msg": "Unsupported provider: provider is not enabled"
+      },
+      "contentRange": null,
+      "contentType": "application/json",
+      "status": 400
+   },
+   "storage buckets": {
+      "body": "404 Not Found",
+      "contentRange": null,
+      "contentType": "text/plain; charset=UTF-8",
+      "status": 404
+   },
+   "storage missing object": {
+      "body": "404 Not Found",
+      "contentRange": null,
+      "contentType": "text/plain; charset=UTF-8",
+      "status": 404
+   }
+}

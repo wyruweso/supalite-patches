@@ -1,0 +1,23 @@
+# The whole claim of this repository is "these assertions diverge and nothing else does". That is a
+# claim a machine can check, so it runs on every push.
+name: verify
+
+on:
+   push:
+   pull_request:
+
+jobs:
+   verify:
+      runs-on: ubuntu-latest
+      steps:
+         - uses: actions/checkout@v4
+         - uses: actions/setup-node@v4
+           with:
+              node-version: 24
+              cache: npm
+         - run: npm ci
+         # typecheck and lint, then the two-build comparison: a patch that stopped applying, an
+         # undeclared divergence and a declared one that never happened all fail here.
+         - run: npm run verify
+         # The reproductions are demonstrations, not assertions — this only proves they still run.
+         - run: npm run repro

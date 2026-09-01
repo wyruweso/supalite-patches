@@ -2,6 +2,7 @@
    "name": "supalite-patches",
    "version": "1.0.0",
    "private": true,
+   "license": "Apache-2.0",
    "type": "module",
    "description": "Readable patches for @supabase/lite: five defect fixes and three unimplemented capabilities, applied to the published bundle.",
    "scripts": {

@@ -118,3 +118,10 @@ somewhere inside Babel.
 **all eight patches found their places in a build they were not written for**, and every assertion
 passed there — including the two that add routes. A textual anchor would not have survived the
 rebuild. None of the defects is fixed upstream, and none of the capabilities exists there.
+
+## Licence
+
+Apache-2.0, the same licence as `@supabase/lite` itself. The parts that replace, wrap or characterise
+the package are derivative works of it, and `NOTICE` says which and credits Supabase. The published
+package is not redistributed here: it is installed from npm, patched in place, and the patched build
+stays local.

@@ -1,0 +1,27 @@
+supalite-patches
+Copyright 2026 Mikhail Tseluiko
+
+This product includes and derives from software developed by Supabase:
+
+   @supabase/lite, version 0.9.0
+   Copyright 2026 Supabase
+   Licensed under the Apache License, Version 2.0
+
+The following are derivative works of that package, written against its
+published build and reproducing parts of its behaviour and structure:
+
+   fixes/*/src/**       replacement and wrapper implementations
+   features/*/src/**    replacement and wrapper implementations
+   pins/**              assertions describing the published package
+
+Each such file replaces, wraps or characterises a function of the original.
+Where a wrapper is used, the original implementation is retained and called;
+the modification is the surrounding behaviour, and every patch directory's
+README states what was changed and why.
+
+The published package itself is not redistributed here. It is installed from
+npm as a dependency, patched in place, and the patched build is not published.
+
+Everything else in this repository — the patcher in lib/, the runners in
+test/, the reproductions, and the documents — is original work under the
+same licence.

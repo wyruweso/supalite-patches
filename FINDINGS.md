@@ -2,7 +2,10 @@
 
 Eight defects in the published `@supabase/lite@0.9.0`, grouped by the patch that closes them —
 several share a root cause, which is why five patches cover eight defects. Nothing is listed here
-that is not also fixed, tested and reproducible. Every one is still present in `0.9.1-next.1`.
+that is not also fixed, tested and reproducible.
+
+Still present in `0.9.1-next.1` and `0.9.1-next.2`, except FIX-003, which upstream fixed in
+`0.9.1-next.2` — its section below is kept and marked.
 
 Each patch directory holds a `repro.ts` that demonstrates its findings on a real build:
 
@@ -115,6 +118,11 @@ reproduction is what corrected it.
 ---
 
 ## FIX-003 — values arrive in the wrong types
+
+> **Fixed upstream in `0.9.1-next.2`.** Kept here because it is a defect of `0.9.0`, the version
+> under study, and because the patch is what the entry describes. On `0.9.1-next.2` the published
+> build passes this patch's assertions unchanged: arrays are arrays, `jsonb` is an object, and
+> `boolean` is `true`.
 
 ```jsonc
 // GET /rest/v1/items?select=tags,meta,ok

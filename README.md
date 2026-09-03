@@ -8,11 +8,11 @@ patch applied** — and `pins/`, a suite describing what the published package d
 answer on both builds. So "nothing else changes" is a check, not a claim.
 
 ```
-published   779/870 passed
-patched     870/870 passed
+published   788/879 passed
+patched     879/879 passed
 
 PROVEN: 91 assertions fail on the published build and pass with the patches
-UNTOUCHED: the other 779 assertions behave the same on both
+UNTOUCHED: the other 788 assertions behave the same on both
 ```
 
 ```bash
@@ -33,7 +33,7 @@ After `install:patches` the patched library is reachable through an ordinary
 | ------- | -------------------------------------------------------------------------------- |
 | FIX-001 | a partial index loses its `WHERE`, so the database rejects rows Postgres accepts |
 | FIX-002 | every RLS refusal and constraint violation comes back as `500 SUP`               |
-| FIX-003 | arrays and `jsonb` arrive as JSON strings, `boolean` as `0`/`1`                  |
+| FIX-003 | arrays and `jsonb` arrive as JSON strings, `boolean` as `0`/`1` — fixed upstream in `0.9.1-next.2` |
 | FIX-004 | publication statements are emitted mangled or refused, and kill the migration    |
 | FIX-005 | triggers never reach the database through the migrator                           |
 
@@ -68,7 +68,7 @@ the minified bundle — there is no patch code inside the patcher.
 A reproduction derives its verdict from what it observed, so the same script reads `AS DESCRIBED` on
 the published build and `DIFFERS` on the patched one.
 
-`pins/` holds the rest of the suite: 775 assertions describing the published package as it is,
+`pins/` holds the rest of the suite: 771 assertions describing the published package as it is,
 defects included. They are not there to pass — they are there to stay identical across both builds,
 so a patch that reached further than its own directory shows up as a diverging assertion nobody
 declared.
@@ -88,9 +88,9 @@ that is found by its message instead — it is called from everywhere, so there 
 its name off, and raising the library's own error is what puts a 400 where a 500 would otherwise be.
 
 **Splicing.** Only the body of the located function is replaced, so the other 500 KB come through byte
-for byte — which is what makes "this patch touched nothing else" a real check rather than a formality.
-`wrapFunction` and `wrapMethod` rename the original and put a short wrapper in its place, for a small
-change to a large function; wrappers stack, and `plan` is wrapped by both FIX-001 and FIX-005.
+for byte. `wrapFunction` and `wrapMethod` rename the original and put a short wrapper in its place,
+for a small change to a large function; wrappers stack, and `plan` is wrapped by both FIX-001 and
+FIX-005.
 
 **Data, not only code.** Some of what the library is, is a string: the auth schema is one long DDL
 constant, and a feature needing a table has to put it there. A table created any other way exists on
@@ -114,10 +114,13 @@ already changed. Verified both ways round.
 Verified against `0.9.0` and `0.9.1-next.1`; any other version is refused by name rather than failing
 somewhere inside Babel.
 
-`0.9.1-next.1` appeared while this was being written, which made it an unplanned test of the design:
-**all eight patches found their places in a build they were not written for**, and every assertion
-passed there — including the two that add routes. A textual anchor would not have survived the
-rebuild. None of the defects is fixed upstream, and none of the capabilities exists there.
+Two prereleases have appeared since, and all eight patches applied to both without changes.
+
+`0.9.1-next.2` fixes one of the defects: FIX-003 is no longer needed there, and its assertions pass on
+the published build. The other four defects and all three capabilities are unchanged. That release
+also reworks storage — bucket creation now requires `id` as well as `name` and is subject to RLS, and
+`storage` is no longer an exposed REST schema — so `pins/`, which describes `0.9.0`, reports those as
+differences by design.
 
 ## Licence
 

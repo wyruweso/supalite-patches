@@ -266,7 +266,7 @@ describe('FEAT-001 anonymous sign-in', () => {
     */
    test('a non-ASCII address survives being re-signed', async () => {
       const { app }: { app: LiteApp } = await newAnonApp()
-      const address = 'міхайло@example.test'
+      const address = 'михайло@example.test'
 
       const session = await post(app, '/auth/v1/signup', { email: address, password: 'password123' })
       assert.equal(session.body.user.email, address)

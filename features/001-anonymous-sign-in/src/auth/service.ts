@@ -181,7 +181,7 @@ async function withAnonymousClaim(session: Session, user: UserRow, secret: strin
 
 /**
  * `atob` yields one character per byte, so the UTF-8 those bytes spell still has to be decoded:
- * without this a claim reading `міхайло@example.test` is re-signed as `Ð¼Ñ…@example.test`, correctly
+ * without this a claim reading `михайло@example.test` is re-signed as `Ð¼Ñ…@example.test`, correctly
  * signed and wrong.
  */
 function fromBase64Url(value: string): string {

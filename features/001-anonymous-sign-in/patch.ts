@@ -3,6 +3,15 @@
 // FEATURES.md marks this planned, effort S, no blocker. It was deferred rather than forgotten:
 // `auth.users` already has an indexed `is_anonymous` column, the repository reads and writes it, and
 // the attempt is refused by a named error, `anonymous_provider_disabled`. Only the path was missing.
+//
+// What it does not do: the user row and the first session are not written in one transaction. A
+// failure issuing the session strands an anonymous user with no credential to sign back in with, and
+// nothing will ever reach that row again. Closing it means owning session creation rather than
+// wrapping it, which is a larger change than this feature.
+//
+// The JWT helpers at the foot of `src/auth/service.ts` are duplicated in FEAT-003, which re-signs
+// tokens for its own reasons. The duplication is deliberate: a patch that imported them from a
+// neighbour could not be applied on its own.
 import { methodNamed, moduleFunctionWithText, wrapMethod } from '../../lib/patcher.ts'
 
 export const id = 'FEAT-001'

@@ -256,6 +256,47 @@ describe('FEAT-001 anonymous sign-in', () => {
       assert.equal(user.user_metadata.cart, 'before sign-in')
    })
 
+   /**
+    * Both halves of re-signing a token, asserted on an ordinary user: the claim is stamped on every
+    * token, so anything the re-signing gets wrong is wrong for everybody.
+    *
+    * `atob` returns one character per byte, so the UTF-8 those bytes spell has to be decoded before
+    * the claims are parsed — otherwise the address is re-signed mangled, with a valid signature over
+    * the wrong data, while the user object still reads correctly.
+    */
+   test('a non-ASCII address survives being re-signed', async () => {
+      const { app }: { app: LiteApp } = await newAnonApp()
+      const address = 'міхайло@example.test'
+
+      const session = await post(app, '/auth/v1/signup', { email: address, password: 'password123' })
+      assert.equal(session.body.user.email, address)
+      assert.equal(claimsOf(session.body.access_token).email, address)
+
+      const refreshed = await post(app, '/auth/v1/token?grant_type=refresh_token', {
+         refresh_token: session.body.refresh_token,
+      })
+      assert.equal(claimsOf(refreshed.body.access_token).email, address)
+   })
+
+   /**
+    * The library hangs `session_id` and `user_id` off the session non-enumerably and reads them back
+    * for these headers, so replacing the token by spreading the session drops both — invisibly,
+    * because signing in still works.
+    */
+   test('the session headers survive being re-signed', async () => {
+      const { app }: { app: LiteApp } = await newAnonApp()
+      const session = await post(app, '/auth/v1/signup', { email: 'headers@b.co', password: 'password123' })
+
+      assert.match(String(session.headers.get('sb-auth-session-id')), /^[0-9a-f-]{36}$/)
+      assert.match(String(session.headers.get('sb-auth-user-id')), /^[0-9a-f-]{36}$/)
+
+      const refreshed = await post(app, '/auth/v1/token?grant_type=refresh_token', {
+         refresh_token: session.body.refresh_token,
+      })
+      assert.equal(refreshed.headers.get('sb-auth-session-id'), session.headers.get('sb-auth-session-id'))
+      assert.equal(refreshed.headers.get('sb-auth-user-id'), session.headers.get('sb-auth-user-id'))
+   })
+
    // Guard: an ordinary sign-up must not notice any of this.
    test('an ordinary signup is unchanged', async () => {
       const { app }: { app: LiteApp } = await newAnonApp()

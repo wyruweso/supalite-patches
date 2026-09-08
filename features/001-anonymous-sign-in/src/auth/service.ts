@@ -62,22 +62,11 @@ export async function signUp(
    data: Record<string, unknown>,
 ): Promise<unknown> {
    // Anonymous means no credentials at all; half a pair stays an error the original reports.
-   //
-   // Deliberately stricter than upstream, which looks only for a missing email or phone and so sends
-   // `{email: "", password: "x"}` down the anonymous path. A request carrying a password is not
-   // `signInAnonymously()`, whatever else is missing from it.
    if (email || password) return this.signUpOriginal(email, password, data)
 
-   // Supabase gates this behind `enable_anonymous_sign_ins`, which defaults to off: allowing
-   // sign-ups does not allow anonymous ones.
-   //
-   // Checked before the sign-up flag, as upstream does, and that order is why the refusal is raised
-   // here rather than delegated: with both switched off the answer should be
-   // `anonymous_provider_disabled`, the specific reason, not `signup_disabled`. The error is the
-   // library's own, called by the name the patcher recovered.
+   // Before the sign-up flag, as upstream checks it: with both switched off the answer should name
+   // the anonymous provider, not sign-ups.
    if (this.config.enable_anonymous_sign_ins !== true) throw anonymousProviderDisabled()
-
-   // Sign-ups off refuses it too, and there the original's answer is the right one.
    if (this.config.enable_signup === false) return this.signUpOriginal(email, password, data)
 
    const user = await this.repo.createUser({
@@ -91,11 +80,7 @@ export async function signUp(
    })
 
    // Role `authenticated`, as in hosted Supabase: an anonymous user is signed in, just without
-   // credentials. Policies tell them apart by the `is_anonymous` claim, not by role.
-   //
-   // Row and session are not one transaction — the seam left here. A failure issuing the session
-   // strands an anonymous user with no credential to sign back in with, but closing it would mean
-   // owning session creation rather than wrapping it.
+   // credentials. Policies tell them apart by the claim, not by the role.
    const session = await this.createSessionForUser(user, [], 'session')
    return { user: session.user, session }
 }
@@ -117,9 +102,8 @@ export function mapUserToResponse(
  * The session, with `is_anonymous` in the access token — the half that matters, since Supabase's
  * documented check is `auth.jwt() ->> 'is_anonymous'` in a policy, which a row-only flag never reaches.
  *
- * The original assembles the claims inline, so there is nothing to hook and the token is re-signed.
- * Its header is carried over rather than rebuilt, or anything the library adds later would be
- * dropped — a `kid` for key rotation, or the header another patch wrapping this method preserved.
+ * The claims are assembled inline in the original, so the token is re-signed rather than hooked, and
+ * its header carried over rather than rebuilt: a `kid` for key rotation would otherwise be lost.
  */
 export async function createSessionForUser(
    this: AuthService,
@@ -128,7 +112,7 @@ export async function createSessionForUser(
    context?: string,
    options?: unknown,
 ): Promise<Session> {
-   const promoted = await promoteIfClaimed(this, user, context)
+   const promoted = await markVerifiedAnonymousUserAsPermanent(this, user, context)
    return withAnonymousClaim(
       await this.createSessionForUserOriginal(promoted, identities, context, options),
       promoted,
@@ -171,7 +155,7 @@ export async function createRefreshResponse(
  * Done at session creation rather than during verification because that is where the token is
  * minted: the row is promoted before the claims are read off it.
  */
-async function promoteIfClaimed(service: AuthService, user: UserRow, context?: string): Promise<UserRow> {
+async function markVerifiedAnonymousUserAsPermanent(service: AuthService, user: UserRow, context?: string): Promise<UserRow> {
    if (context !== 'verify' || !isAnonymous(user.is_anonymous) || !user.email) return user
 
    await service.repo.updateUser(user.id, { is_anonymous: false })
@@ -186,15 +170,23 @@ async function promoteIfClaimed(service: AuthService, user: UserRow, context?: s
 async function withAnonymousClaim(session: Session, user: UserRow, secret: string): Promise<Session> {
    const [header, payload] = session.access_token.split('.')
    const claims = JSON.parse(fromBase64Url(payload))
-   // Re-signed from the decoded claims, so `iat`, `exp` and `session_id` are the original's.
-   return {
-      ...session,
-      access_token: await resign(header, { ...claims, is_anonymous: isAnonymous(user.is_anonymous) }, secret),
-   }
+
+   // Re-signed from the decoded claims, so `iat`, `exp` and `session_id` are the original's — and
+   // written onto the session the library built rather than a copy of it: `session_id` and `user_id`
+   // hang off it non-enumerably, and the server reads them back for the Sb-Auth-* response headers,
+   // so a spread would silently drop both.
+   session.access_token = await resign(header, { ...claims, is_anonymous: isAnonymous(user.is_anonymous) }, secret)
+   return session
 }
 
+/**
+ * `atob` yields one character per byte, so the UTF-8 those bytes spell still has to be decoded:
+ * without this a claim reading `міхайло@example.test` is re-signed as `Ð¼Ñ…@example.test`, correctly
+ * signed and wrong.
+ */
 function fromBase64Url(value: string): string {
-   return atob(value.replace(/-/g, '+').replace(/_/g, '/'))
+   const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/'))
+   return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)))
 }
 
 function toBase64Url(bytes: Uint8Array): string {

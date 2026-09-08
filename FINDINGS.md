@@ -4,8 +4,8 @@ Eight defects in the published `@supabase/lite@0.9.0`, grouped by the patch that
 several share a root cause, which is why five patches cover eight defects. Nothing is listed here
 that is not also fixed, tested and reproducible.
 
-Still present in `0.9.1-next.1` and `0.9.1-next.2`, except FIX-003, which upstream fixed in
-`0.9.1-next.2` — its section below is kept and marked.
+Re-measured on `0.9.1-next.1`, `0.9.1-next.2`, `0.10.0` and `0.10.1-next.2`. All still present,
+except FIX-003, which upstream fixed in `0.9.1-next.2` — its section below is kept and marked.
 
 Each patch directory holds a `repro.ts` that demonstrates its findings on a real build:
 
@@ -75,10 +75,14 @@ The inconsistency is visible side by side in one table:
 | violated constraint                                   | status    | body                                                                      |
 | ----------------------------------------------------- | --------- | ------------------------------------------------------------------------- |
 | named (`array_type`, generated for `int[]`)           | `400`     | `{"code":"23514","message":"check constraint \"array_type\" violated …"}` |
-| inline and unnamed (numeric precision, date validity) | **`500`** | `{"code":"SUP","message":"Error: CHECK constraint failed: …"}`            |
+| inline and unnamed (`CHECK (quantity > 0)`, date validity) | **`500`** | `{"code":"SUP","message":"Error: CHECK constraint failed: …"}`       |
 
-Writing `1.005` to a `numeric(8,2)` column, or `'not-a-date'` to a `date` column, is a client error.
-Both are reported as a server fault, with the raw SQLite constraint text as the message.
+Writing `-1` to a column declared `int CHECK (quantity > 0)`, or `'not-a-date'` to a `date` column,
+is a client error. Both are reported as a server fault, with the raw SQLite constraint text as the
+message.
+
+`23514` is also the one SQLSTATE the ladder has no branch for, so coding the error correctly is not
+enough on its own — the mapper needs the case as well.
 
 ### Every other constraint violation, for a reason worth reading
 
@@ -115,14 +119,21 @@ sees it — and that working neighbour is what makes this read as a single missi
 conversion step that never fires. It was first recorded here as exactly that mistake; writing the
 reproduction is what corrected it.
 
+**What this does not cover.** `SQLITE_CONSTRAINT_DATATYPE` — a value SQLite will not store in a
+STRICT column, `{"age": "not-a-number"}` for an `int` — still answers `500`. The fix deliberately
+leaves it: the same code is raised when the library fails to serialise a type it claims to support,
+and for `bytea` the correct answer is neither `400` nor `500` but a successful insert, since Postgres
+accepts `H656c6c6f`. Coding it `22P02` would dress a missing conversion as bad input, and telling
+the two apart means reading the message, which is the habit this patch exists to end. The `bytea`
+gap is its own entry in `ADDITIONAL_FINDINGS.md`.
+
 ---
 
 ## FIX-003 — values arrive in the wrong types
 
-> **Fixed upstream in `0.9.1-next.2`.** Kept here because it is a defect of `0.9.0`, the version
-> under study, and because the patch is what the entry describes. On `0.9.1-next.2` the published
-> build passes this patch's assertions unchanged: arrays are arrays, `jsonb` is an object, and
-> `boolean` is `true`.
+> **Fixed upstream in `0.9.1-next.2` and later, `0.10.0` included.** Kept here because it is a defect
+> of `0.9.0`, the version under study. On those versions the published build passes this patch's
+> assertions unchanged.
 
 ```jsonc
 // GET /rest/v1/items?select=tags,meta,ok
@@ -134,12 +145,41 @@ reproduction is what corrected it.
 Values are stored correctly and the round trip is lossless, but the client receives the _characters_
 of the JSON and has to parse them itself, and `row.ok === true` is never true.
 
-One root cause for both: the column is matched to the wrong field class, because introspection reads
-the schema back from SQLite, where only the physical types remain.
+**The declared types are not lost — they are unreachable.** They are collected while the Postgres DDL
+is translated and merged back into the introspection by `mergeDeparseMetadata`, behind this guard:
+
+```js
+this.config.ddlDialect === "postgres" && e?.postprocess !== false && (r = this.mergeDeparseMetadata(r))
+```
+
+`SqliteConnection`'s constructor never defaults `ddlDialect`, so for every connection created without
+one it is `undefined`, the merge is skipped, and `deserializeRow` — gated on the same field — is
+skipped with it. Two lines below the guard, the very same value is reported with the default the
+branch lacks:
+
+```js
+ddl_dialect: this.config.ddlDialect ?? "postgres"
+```
+
+So the introspection announces the dialect whose handling was just skipped. Nothing needs inferring;
+the published build answers correctly if the field is supplied by hand:
+
+```
+createConnection({ url: ':memory:' })                            → { "tags": "[\"a\",\"b\"]", "ok": 1 }
+createConnection({ url: ':memory:', ddlDialect: 'postgres' })     → { "tags": ["a","b"], "ok": true }
+```
+
+The fix supplies the default. Because it restores the metadata rather than guessing at it, an
+integer column stays an integer whatever its CHECK constraints say and whatever it sits beside.
 
 **Impact:** supabase-js hands the caller a string and an integer where the Postgres-backed service
 hands it an array, an object and a boolean — so code written against hosted Supabase breaks at the
 point of use (`row.tags.map(...)`), not at the query.
+
+**What this does not cover.** An array's element type is not restored: `boolean[]` still reads back
+as `[1, 0]`, because the merged metadata records the element type as `bool` and nothing maps the
+elements through it. `int[]` and `text[]` are unaffected, their elements arriving from JSON already
+in the right shape. Still true in `0.10.0`, and recorded separately in `ADDITIONAL_FINDINGS.md`.
 
 ---
 
@@ -180,7 +220,22 @@ alter publication supabase_realtime add table messages;
 
 So a schema exported from a project using Realtime dies on the first of its publication lines, before
 reaching the mangled `ALTER` at all. The fix is the whole family rather than the one mangled form:
-publication metadata never reaches SQLite DDL. It does not implement Realtime — SQLite has no logical
+publication metadata never reaches SQLite DDL.
+
+The family is five statements across five node types, and only two of them announce themselves by
+type. The rest share theirs with every other kind of database object, so each has to be read by the
+object it names:
+
+| statement                   | node                    | recognised by                          |
+| --------------------------- | ----------------------- | -------------------------------------- |
+| `CREATE PUBLICATION`        | `CreatePublicationStmt` | the node type                          |
+| `ALTER PUBLICATION` ADD/SET/DROP | `AlterPublicationStmt` | the node type                     |
+| `DROP PUBLICATION`          | `DropStmt`              | `removeType: 'OBJECT_PUBLICATION'`     |
+| `ALTER PUBLICATION … RENAME TO` | `RenameStmt`        | `renameType: 'OBJECT_PUBLICATION'`     |
+| `ALTER PUBLICATION … OWNER TO`  | `AlterOwnerStmt`    | `objectType: 'OBJECT_PUBLICATION'`     |
+
+The last two fail on the published build with `RenameStmt with renameType OBJECT_PUBLICATION is not
+supported in SQLite` and `Unsupported node type: AlterOwnerStmt`. It does not implement Realtime — SQLite has no logical
 replication for a publication to mean anything in — it stops publications taking the schema down with
 them.
 
@@ -209,3 +264,21 @@ as a side effect of rebuilding the table they hang off.
 **Impact:** the canonical Supabase recipes break — `handle_new_user()` on `auth.users`, which creates
 a row in `public.profiles` on sign-up, and the `updated_at` trigger. They break silently: the
 migration reports success and the tables are there.
+
+**Order, not only presence.** Creating the triggers exposes a second problem that the empty database
+hid. SQLite drops a table's own triggers with the table, but a trigger on *another* table that
+mentions it survives — and the rebuild's `ALTER TABLE … RENAME` validates the whole schema and
+refuses:
+
+```
+error in trigger on_src_insert: no such table: main.dst
+```
+
+The trigger is on `src`, the rebuilt table is `dst`, and nothing about the trigger changed, so there
+is no trigger change for a diff to notice. The fix drops every trigger before tables are replaced and
+creates the desired ones once they exist again — more work than the minimum, and the minimum is a
+dependency graph over trigger bodies.
+
+The plan's own `BEGIN`/`COMMIT` steps are not what makes this safe: `migratePlan` filters those
+markers out and runs every remaining statement inside one transaction of its own. A migration that
+fails after the drops therefore takes them back with it, which the tests assert by breaking one.

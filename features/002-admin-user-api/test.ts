@@ -291,9 +291,10 @@ describe('FEAT-002 admin user API', () => {
       assert.deepEqual(await rows(fresh.connection, 'SELECT token FROM "auth.refresh_tokens"'), [])
    })
 
-   // supabase-js sends `{ should_soft_delete }`. Upstream keeps the row and the address while the
-   // tokens, both metadata objects and the identity data go, and the factors are deleted outright.
-   test('a soft delete empties the user rather than removing it', async () => {
+   // supabase-js sends `{ should_soft_delete }`. Upstream keeps the row and its id, replaces the
+   // identifiers with a digest, clears the password, empties both metadata objects and the identity
+   // data, and deletes the factors outright.
+   test('a soft delete empties the user and unnames them', async () => {
       const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
       const session = (
          await post(fresh.app, '/auth/v1/signup', {
@@ -315,23 +316,33 @@ describe('FEAT-002 admin user API', () => {
 
       const [row] = await rows(
          fresh.connection,
-         `SELECT email, deleted_at, encrypted_password, raw_user_meta_data, raw_app_meta_data, confirmation_token
+         `SELECT id, email, deleted_at, encrypted_password, raw_user_meta_data, raw_app_meta_data, confirmation_token
             FROM "auth.users"`,
       )
       assert.ok(row.deleted_at, 'deleted_at was not set')
-      assert.equal(row.email, 'soft@b.co', 'the address is kept, as upstream keeps it')
+      assert.equal(row.id, session.user.id, 'the row and its id are kept, so references still resolve')
+
+      // GoTrue replaces the identifiers with base64url(sha256(id + value)) rather than keeping them.
+      assert.notEqual(row.email, 'soft@b.co', 'the address was kept, so it stays registered for ever')
+      assert.match(String(row.email), /^[A-Za-z0-9_-]{43}$/)
+
+      assert.equal(row.encrypted_password, null)
       assert.equal(row.raw_user_meta_data, '{}')
       assert.equal(row.raw_app_meta_data, '{}')
       assert.equal(row.confirmation_token, null)
 
-      // Soft-deleted, not removed: the row stays and is emptied, so references still resolve.
-      const identities = await rows(fresh.connection, 'SELECT identity_data FROM "auth.identities"')
+      // Emptied and re-keyed, not removed, so references to the identity still resolve.
+      const identities = await rows(fresh.connection, 'SELECT identity_data, provider_id FROM "auth.identities"')
       assert.equal(identities.length, 1)
       assert.equal(identities[0].identity_data, '{}')
+      assert.notEqual(identities[0].provider_id, session.user.id)
 
-      // Not upstream's: the guard already refuses the session, but a credential that still verifies
-      // is one waiting for whoever adds the next sign-in path.
-      assert.equal(row.encrypted_password, null)
+      // The consequence an operator meets: the address is free again.
+      const again = await req(fresh.app, 'POST', '/auth/v1/admin/users', { email: 'soft@b.co' }, admin)
+      assert.equal(again.status, 200, `the address stayed registered: ${JSON.stringify(again.body).slice(0, 120)}`)
+      assert.notEqual(again.body.id, session.user.id)
+
+      // And the old credentials are gone with it.
       const signedIn = await post(fresh.app, '/auth/v1/token?grant_type=password', {
          email: 'soft@b.co',
          password: 'password123',
@@ -340,12 +351,10 @@ describe('FEAT-002 admin user API', () => {
    })
 
    /**
-    * A soft delete claims the user cannot sign in, while deliberately leaving the address behind — so
-    * the claim has to hold against the passwordless paths too. This build has `/otp`, `/magiclink`
-    * and `/recover`, all reachable by that surviving address and none reading `deleted_at`.
-    *
-    * The refusal is in `createSessionForUser`, not the routes: an OTP may well be issued and
-    * delivered, as upstream does to avoid confirming "no account here", but it buys nothing.
+    * A soft delete claims the user cannot sign in. The identifiers no longer name the row, so the
+    * passwordless paths cannot reach it — but they are exercised anyway, because a code delivered to
+    * an address that is now free is a different matter from one delivered to a deleted user. What
+    * must hold either way: nothing authenticates as that id.
     */
    test('a soft-deleted user cannot sign in by any path this build offers', async () => {
       const { app: fresh, connection, mail } = await newAppWithMailbox()
@@ -357,29 +366,27 @@ describe('FEAT-002 admin user API', () => {
       const password = await post(fresh, '/auth/v1/token?grant_type=password', { email, password: 'password123' })
       assert.notEqual(password.status, 200, 'the password still worked')
 
-      // An OTP to the address that outlived the delete, verified as a live user would — the path a
-      // password-only soft delete leaves wide open.
       assert.equal((await post(fresh, '/auth/v1/otp', { email })).status, 200)
       const code = mail.code(email)
-      // Asserted, because if the code stopped being delivered this test would pass while proving
-      // nothing — the delivery is what makes the path dangerous.
-      assert.match(code ?? '', /^\d{6}$/, 'no OTP reached the address, so the path was never tested')
+      if (code) {
+         const verified = await post(fresh, '/auth/v1/verify', { type: 'magiclink', token: code, email })
+         if (verified.status === 200) assert.notEqual(verified.body.user.id, signup.user.id)
+      }
 
-      const verified = await post(fresh, '/auth/v1/verify', { type: 'magiclink', token: code, email })
-      assert.notEqual(verified.status, 200, 'an OTP signed a deleted user in')
-      assert.equal(verified.body.error_code, 'invalid_credentials')
-
-      // And the recovery link, which is the same hole wearing a different name.
       assert.equal((await post(fresh, '/auth/v1/recover', { email })).status, 200)
       const token = mail.token(email)
-      assert.ok(token, 'no recovery token reached the address, so the path was never tested')
+      if (token) {
+         const recovered = await post(fresh, '/auth/v1/verify', { type: 'recovery', token, email })
+         if (recovered.status === 200) assert.notEqual(recovered.body.user.id, signup.user.id)
+      }
 
-      const recovered = await post(fresh, '/auth/v1/verify', { type: 'recovery', token, email })
-      assert.notEqual(recovered.status, 200, 'a recovery link signed a deleted user in')
+      const owned = (table: string) => `SELECT id FROM "auth.${table}" WHERE user_id = '${signup.user.id}'`
+      assert.deepEqual(await rows(connection, owned('sessions')), [])
+      assert.deepEqual(await rows(connection, owned('refresh_tokens')), [])
 
-      // The end state is what matters: whatever the routes answered, no session exists.
-      assert.deepEqual(await rows(connection, 'SELECT id FROM "auth.sessions"'), [])
-      assert.deepEqual(await rows(connection, 'SELECT id FROM "auth.refresh_tokens"'), [])
+      // The row itself is still there, by id, for the guard to refuse.
+      const direct = await req(fresh, 'GET', `/auth/v1/admin/users/${signup.user.id}`, undefined, admin)
+      assert.equal(direct.status, 200)
    })
 
    /**
@@ -494,5 +501,82 @@ describe('FEAT-002 admin user API', () => {
       const r = await get(app, '/auth/v1/admin/users', { Authorization: `Bearer ${session.access_token}` })
       assert.equal(r.status, 403)
       assert.equal(r.body.error_code, 'not_admin')
+   })
+
+   /**
+    * Input read strictly, because the lenient reading of each of these was a wrong answer rather than
+    * a rough one: a mistyped delete flag removed the user irreversibly, and a page that is not a whole
+    * number reached the database as an OFFSET and came back a 500.
+    */
+   describe('malformed input is refused before anything happens', () => {
+      test('a should_soft_delete that is not a boolean is a 400, and keeps the user', async () => {
+         const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
+         const user = (await post(fresh.app, '/auth/v1/signup', { email: 'typo@b.co', password: 'password123' })).body
+            .user
+
+         const r = await req(
+            fresh.app,
+            'DELETE',
+            `/auth/v1/admin/users/${user.id}`,
+            { should_soft_delete: 'true' },
+            admin,
+         )
+         assert.equal(r.status, 400, `a string flag was accepted: ${JSON.stringify(r.body).slice(0, 120)}`)
+         assert.equal((await rows(fresh.connection, 'SELECT id FROM "auth.users"')).length, 1, 'the user was removed')
+      })
+
+      test('a body that is not an object is bad JSON', async () => {
+         const r = await req(app, 'POST', '/auth/v1/admin/users', '[1,2]', {
+            ...admin,
+            'Content-Type': 'application/json',
+         })
+         assert.equal(r.status, 400)
+         assert.equal(r.body.error_code, 'bad_json')
+      })
+
+      for (const query of ['page=1.5', 'per_page=1.5', 'page=Infinity', 'page=0', 'per_page=-1'])
+         test(`?${query} is a 400, not a 500`, async () => {
+            const r = await get(app, `/auth/v1/admin/users?${query}`, admin)
+            assert.equal(r.status, 400, `answered ${r.status}`)
+         })
+   })
+
+   // `createUser` writes a fixed set of columns and `phone_confirmed_at` is not among them, so the
+   // flag was accepted and dropped.
+   test('phone_confirm marks the number confirmed', async () => {
+      const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
+      const r = await req(
+         fresh.app,
+         'POST',
+         '/auth/v1/admin/users',
+         { phone: '+15550777', phone_confirm: true },
+         admin,
+      )
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 140))
+
+      const [row] = await rows(fresh.connection, 'SELECT phone_confirmed_at FROM "auth.users"')
+      assert.ok(row.phone_confirmed_at, 'phone_confirm was accepted and dropped')
+   })
+
+   /**
+    * The generated password has to satisfy the configured policy, or the route refuses its own
+    * credential — after the row is written, leaving a user with no password and an address that now
+    * answers `email_exists`.
+    */
+   test('a minimum password length longer than the generator is still satisfied', async () => {
+      const strict: { app: LiteApp; connection: LiteConnection } = await newRawApp({
+         auth: {
+            enabled: true,
+            jwt_secret: JWT_SECRET,
+            site_url: 'http://localhost:3000',
+            minimum_password_length: 72,
+         },
+      })
+
+      const r = await req(strict.app, 'POST', '/auth/v1/admin/users', { email: 'long@b.co' }, admin)
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 140))
+
+      const [row] = await rows(strict.connection, 'SELECT encrypted_password FROM "auth.users"')
+      assert.match(String(row.encrypted_password), /^\$2[aby]\$/, 'the user was left without a password')
    })
 })

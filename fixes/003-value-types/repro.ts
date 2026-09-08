@@ -26,6 +26,13 @@ show('#5  row.tags.map is', String(typeof row.tags?.map))
 show('#6  ok', `${JSON.stringify(row.ok)}  (${typeof row.ok})`)
 show('#6  row.ok === true', String(row.ok === true))
 
+// The cause, in two lines: the field the metadata merge is gated on has no default, while the
+// introspection that merge would have enriched reports the very default the gate is missing.
+console.log()
+const config = (connection as unknown as { config: { ddlDialect?: string } }).config
+show('config.ddlDialect', JSON.stringify(config.ddlDialect))
+show('introspection.ddl_dialect', JSON.stringify((await connection.introspect()).ddl_dialect))
+
 // DeserializeJsonPlugin exists for exactly this and does run — but only on the arrow path.
 console.log()
 show('selecting meta->x->>y', JSON.stringify((await get(app, '/rest/v1/items?id=eq.1&select=v:meta->x->>y')).body[0]))

@@ -11,8 +11,8 @@ ALTER TABLE owned_notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY own ON owned_notes FOR ALL USING (owner = auth.uid()) WITH CHECK (owner = auth.uid());`
 
 const TYPES = [
-   'CREATE TABLE items (id int primary key, nums int[], price numeric(8,2), born date);',
-   'CREATE TABLE authors (id int primary key, name text not null);',
+   'CREATE TABLE items (id int primary key, nums int[], quantity int check (quantity > 0), born date);',
+   'CREATE TABLE authors (id int primary key, name text not null, email text unique);',
    'CREATE TABLE books (id int primary key, author_id int references authors(id));',
 ].join('\n')
 
@@ -51,7 +51,7 @@ describe('FIX-002 client errors are not reported as server faults', () => {
    })
 
    test('an unnamed CHECK violation is a 400, not a 500', async () => {
-      const r = await post(typedApp, '/rest/v1/items', { id: 2, price: 1.005 }, REPRESENT)
+      const r = await post(typedApp, '/rest/v1/items', { id: 2, quantity: -1 }, REPRESENT)
       assert.equal(r.status, 400)
       assert.equal(pgrstCode(r), '23514')
    })
@@ -77,10 +77,71 @@ describe('FIX-002 client errors are not reported as server faults', () => {
       assert.equal(pgrstCode(r), '23505')
    })
 
+   // A different SQLite code from the one above — 2067 rather than 1555 — and the same SQLSTATE.
+   test('a duplicate value in a UNIQUE column is a 409 too', async () => {
+      await post(typedApp, '/rest/v1/authors', { id: 20, name: 'a', email: 'a@b.co' }, REPRESENT)
+      const r = await post(typedApp, '/rest/v1/authors', { id: 21, name: 'b', email: 'a@b.co' }, REPRESENT)
+      assert.equal(r.status, 409)
+      assert.equal(pgrstCode(r), '23505')
+   })
+
+   test('an anonymous caller refused for want of a policy is a 401', async () => {
+      const r = await post(rlsApp, '/rest/v1/readonly_notes', { id: 9, body: 'x' })
+      assert.equal(r.status, 401)
+      assert.equal(pgrstCode(r), '42501')
+   })
+
    test('a NOT NULL violation is a 400, not a 500', async () => {
       const r = await post(typedApp, '/rest/v1/authors', { id: 8, name: null }, REPRESENT)
       assert.equal(r.status, 400)
       assert.equal(pgrstCode(r), '23502')
+   })
+
+   /**
+    * The conversion itself, called directly, because the priority it gives is the whole point: a
+    * numeric SQLite code is read, a message never is. An error someone else has already formed —
+    * carrying its own code, detail and hint — must come back untouched even when its wording is
+    * exactly that of a constraint violation.
+    */
+   describe('normalizeDbError', () => {
+      let normalise: (err: unknown) => { code?: string; detail?: string; hint?: string; message?: string }
+
+      before(async () => {
+         const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
+         const c = connection as unknown as { normalizeDbError(e: unknown): never }
+         normalise = (err) => c.normalizeDbError(err)
+      })
+
+      test('a node:sqlite constraint error is given its SQLSTATE', () => {
+         const result = normalise({
+            code: 'ERR_SQLITE_ERROR',
+            errcode: 2067,
+            message: 'UNIQUE constraint failed: authors.email',
+         })
+         assert.equal(result.code, '23505')
+      })
+
+      test('an error that already carries a code is returned untouched', () => {
+         const formed = {
+            code: 'PT422',
+            message: 'UNIQUE constraint failed: items.email',
+            detail: 'custom detail',
+            hint: 'custom hint',
+         }
+         const result = normalise(formed)
+         assert.equal(result, formed)
+         assert.equal(result.code, 'PT422')
+         assert.equal(result.detail, 'custom detail')
+         assert.equal(result.hint, 'custom hint')
+      })
+
+      test('an error the constraint table does not know is returned untouched', () => {
+         const unknown = { code: 'ERR_SQLITE_ERROR', errcode: 999999, message: 'something else entirely' }
+         assert.equal(normalise(unknown), unknown)
+
+         const plain = new Error('disk I/O error')
+         assert.equal(normalise(plain), plain)
+      })
    })
 
    // Guards: what already worked must keep working.
@@ -91,13 +152,10 @@ describe('FIX-002 client errors are not reported as server faults', () => {
    })
 
    /**
-    * The working neighbours, asserted on the whole body rather than a status and a code.
-    *
-    * The wrapper runs before the original, so anything it recognises it answers itself — and a named
-    * CHECK reaches it as `CHECK constraint failed: array_type`, which `constraintViolation` matches.
-    * Both answer 400/23514, so only the rest of the body shows which one replied: the original says
-    * `check constraint "array_type" violated for items.nums` with the name in `details`, the wrapper
-    * would put raw SQLite text in both.
+    * The working neighbours, asserted on the whole body rather than a status and a code, because both
+    * answer 400/23514 and only the rest of the body shows which branch replied. A named CHECK is
+    * raised by the library before SQLite sees the row, so it carries no numeric code and the wrapper
+    * passes it through; the original keeps naming the constraint in `details`.
     *
     * Guards, not fixes: these must not diverge, which is why neither is declared.
     */

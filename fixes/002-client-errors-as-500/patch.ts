@@ -6,14 +6,15 @@
 //
 //   WITH CHECK failed on an existing policy    403 PGRST301   (works; left alone)
 //   no policy for the command at all           500 SUP
-//   named CHECK violation                      400 23514
+//   named CHECK violation                      400 23514      (works; left alone)
 //   inline CHECK violation                     500 SUP
 //   duplicate primary key, UNIQUE, NOT NULL,   500 SUP
 //   dangling foreign key
 //
-// The SQLSTATE branches for those constraints are correct; the step before them never fires. See
-// the head of src/server/data.ts.
-import { functionWithText, soleCalleeWithArity, wrapFunction } from '../../lib/patcher.ts'
+// Two edits, because there are two causes. The conversion of a driver error into an SQLSTATE reads
+// better-sqlite3's error shape while the shipped driver is `node:sqlite`, so the ladder's own
+// constraint branches never fire; and two refusals have no branch to reach even once coded.
+import { functionWithText, methodNamed, soleCalleeWithArity, wrapFunction, wrapMethod } from '../../lib/patcher.ts'
 
 export const id = 'FIX-002'
 export const title = 'RLS refusals and constraint violations stop being 500s'
@@ -26,10 +27,23 @@ export const expectedDivergence = [
    'FIX-002 client errors are not reported as server faults > a dangling foreign key is a 409, not a 500',
    'FIX-002 client errors are not reported as server faults > a duplicate primary key is a 409, not a 500',
    'FIX-002 client errors are not reported as server faults > a NOT NULL violation is a 400, not a 500',
+   'FIX-002 client errors are not reported as server faults > a duplicate value in a UNIQUE column is a 409 too',
+   'FIX-002 client errors are not reported as server faults > an anonymous caller refused for want of a policy is a 401',
+   'FIX-002 client errors are not reported as server faults > normalizeDbError',
+   'FIX-002 client errors are not reported as server faults > normalizeDbError > a node:sqlite constraint error is given its SQLSTATE',
+   // The other two normalizeDbError tests are not declared: the published build leaves those errors
+   // alone too, for want of any branch rather than by the rule this patch adds. They guard the rule.
 ]
 
 export function apply(source: string): string {
-   return wrapFunction(source, {
+   const patched = wrapMethod(source, {
+      at: methodNamed('normalizeDbError', 'normalizeBindParams'),
+      replacement: new URL('./src/db/sqlite/SqliteConnection.ts', import.meta.url),
+      exported: 'normalizeDbError',
+      originalAs: 'normalizeDbErrorOriginal',
+   })
+
+   return wrapFunction(patched, {
       // The name is gone, but 42P17 is emitted from this error mapper and nowhere else.
       at: functionWithText('42P17'),
       replacement: new URL('./src/server/data.ts', import.meta.url),

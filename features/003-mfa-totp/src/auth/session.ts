@@ -162,7 +162,11 @@ async function withFactors(
 
 async function withSessionFactors(service: AuthService, userId: string, session: Session): Promise<Session> {
    if (!session?.user) return session
-   return { ...session, user: await withFactors(service, userId, session.user) }
+
+   // Assigned rather than spread: `session_id` and `user_id` hang off the session non-enumerably and
+   // become the Sb-Auth-* response headers, so a copy loses them.
+   session.user = await withFactors(service, userId, session.user)
+   return session
 }
 
 /**
@@ -185,7 +189,10 @@ async function withAssuranceLevel(session: Session, service: AuthService): Promi
    const amr = await methodsOf(service, claims.session_id as string)
    if (amr.length) stamped.amr = amr
 
-   return { ...session, access_token: await resign(session.access_token, stamped, service.config.jwt_secret) }
+   // Written onto the session the library built: `session_id` and `user_id` hang off it
+   // non-enumerably and become the Sb-Auth-* response headers, so a spread would drop them.
+   session.access_token = await resign(session.access_token, stamped, service.config.jwt_secret)
+   return session
 }
 
 async function methodsOf(service: AuthService, sessionId: string): Promise<{ method: string; timestamp: number }[]> {
@@ -221,9 +228,14 @@ function isMissingTable(error: unknown): boolean {
    return false
 }
 
+/**
+ * `atob` yields one character per byte, so the UTF-8 those bytes spell still has to be decoded — or a
+ * claim is re-signed mangled, correctly signed and wrong.
+ */
 function claimsOf(token: string): Record<string, unknown> {
    const [, payload] = token.split('.')
-   return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
+   const binary = atob(payload.replace(/-/g, '+').replace(/_/g, '/'))
+   return JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0))))
 }
 
 function toBase64Url(bytes: Uint8Array): string {

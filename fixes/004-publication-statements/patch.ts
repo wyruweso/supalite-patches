@@ -39,6 +39,9 @@ export const expectedDivergence = [
    'FIX-004 publication statements do not reach the DDL > ALTER PUBLICATION DROP TABLE translates to nothing',
    'FIX-004 publication statements do not reach the DDL > CREATE PUBLICATION translates to nothing',
    'FIX-004 publication statements do not reach the DDL > DROP PUBLICATION translates to nothing',
+   'FIX-004 publication statements do not reach the DDL > ALTER PUBLICATION RENAME TO translates to nothing',
+   'FIX-004 publication statements do not reach the DDL > ALTER PUBLICATION OWNER TO translates to nothing',
+   'FIX-004 publication statements do not reach the DDL > changing only the publication plans nothing and keeps the rows',
    'FIX-004 publication statements do not reach the DDL > the canonical Supabase Realtime block migrates, and the table beside it is created',
 ]
 

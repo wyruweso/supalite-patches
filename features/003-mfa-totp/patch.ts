@@ -53,6 +53,15 @@ export const expectedDivergence = [
    'FEAT-003 TOTP second factor > aal2 survives a refresh',
    'FEAT-003 TOTP second factor > verifying ends the other sessions of that user',
    'FEAT-003 TOTP second factor > the secret is stored, and this build stores it in the clear',
+   'FEAT-003 TOTP second factor > a further factor needs the existing one',
+   'FEAT-003 TOTP second factor > a further factor needs the existing one > an aal1 session cannot enrol another factor',
+   'FEAT-003 TOTP second factor > a further factor needs the existing one > an aal1 session cannot verify a factor enrolled earlier',
+   'FEAT-003 TOTP second factor > a further factor needs the existing one > the owner still steps up from a password-only session',
+   'FEAT-003 TOTP second factor > one use each',
+   'FEAT-003 TOTP second factor > one use each > two concurrent verifications with one challenge: exactly one succeeds',
+   'FEAT-003 TOTP second factor > one use each > the same code is refused through a second challenge',
+   'FEAT-003 TOTP second factor > one use each > concurrent wrong codes are all counted',
+   'FEAT-003 TOTP second factor > a session that already passed MFA is left alone',
 ]
 
 const routes = new URL('./src/auth/mfa.ts', import.meta.url)

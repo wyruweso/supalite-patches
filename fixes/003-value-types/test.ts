@@ -12,12 +12,14 @@ describe('FIX-003 values come back in their Postgres types', () => {
       const a: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
       await (await a.connection.createMigrator(SCHEMA)).migrate()
       app = a.app
-      await post(
+
+      const written = await post(
          app,
          '/rest/v1/items',
          { id: 1, tags: ['a', 'b'], nums: [1, 2], meta: { x: { y: 1 } }, ok: true },
          { Prefer: 'return=representation' },
       )
+      assert.equal(written.status, 201, `the fixture row was not written: ${JSON.stringify(written.body)}`)
    })
 
    const row = async (select: string) => (await get(app, `/rest/v1/items?id=eq.1&select=${select}`)).body[0]
@@ -26,8 +28,6 @@ describe('FIX-003 values come back in their Postgres types', () => {
       assert.deepEqual((await row('tags')).tags, ['a', 'b'])
    })
 
-   // The element type is not in the check, so int[] and text[] are indistinguishable. Values are
-   // unaffected: numbers arrive from JSON as numbers.
    test('an int[] column keeps its numbers as numbers', async () => {
       assert.deepEqual((await row('nums')).nums, [1, 2])
    })
@@ -41,27 +41,78 @@ describe('FIX-003 values come back in their Postgres types', () => {
    })
 
    test('the round trip is still lossless', async () => {
-      const r = await post(
-         app,
-         '/rest/v1/items',
-         { id: 2, tags: ['c'], nums: [3], meta: { z: 1 }, ok: false },
-         { Prefer: 'return=representation' },
-      )
-      assert.equal(r.status, 201)
-      assert.deepEqual((await get(app, '/rest/v1/items?id=eq.2&select=tags,ok')).body[0], { tags: ['c'], ok: false })
+      const sent = { id: 2, tags: ['c'], nums: [3], meta: { z: 1 }, ok: false }
+      const written = await post(app, '/rest/v1/items', sent, { Prefer: 'return=representation' })
+      assert.equal(written.status, 201)
+
+      const read = (await get(app, '/rest/v1/items?id=eq.2&select=id,tags,nums,meta,ok')).body[0]
+      assert.deepEqual(read, sent)
    })
 
-   // The declared type is recovered from the CHECK the translator wrote, and one column name can end
-   // another: `book_k IN (0, 1)` contains `k IN (0, 1)`, so `k` came back as true instead of 1.
-   test('a column does not borrow the type of one whose name ends with its own', async () => {
-      const other: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
-      await (
-         await other.connection.createMigrator('CREATE TABLE t (id int primary key, k int, book_k boolean);')
-      ).migrate()
-      await post(other.app, '/rest/v1/t', { id: 1, k: 1, book_k: true })
+   /**
+    * The declared types are read from the metadata gathered during translation, not inferred from the
+    * schema SQLite kept — so nothing an integer column happens to sit near can change its type. Each
+    * of these three came back as `true` while the type was being guessed from CHECK text.
+    */
+   describe('an integer column stays an integer', () => {
+      const integerBesides = async (ddl: string, insert: Record<string, unknown>) => {
+         const other: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
+         await (await other.connection.createMigrator(ddl)).migrate()
+         const written = await post(other.app, '/rest/v1/t', insert, { Prefer: 'return=representation' })
+         assert.equal(written.status, 201, `the row was not written: ${JSON.stringify(written.body)}`)
+         return (await get(other.app, '/rest/v1/t?id=eq.1&select=*')).body[0]
+      }
 
-      const row = (await get(other.app, '/rest/v1/t?id=eq.1&select=k,book_k')).body[0]
-      assert.equal(row.k, 1)
-      assert.equal(row.book_k, true)
+      // `book_k IN (0, 1)` contains `k IN (0, 1)`.
+      test('beside a boolean whose name ends with its own', async () => {
+         const row = await integerBesides('CREATE TABLE t (id int primary key, k int, book_k boolean);', {
+            id: 1,
+            k: 1,
+            book_k: true,
+         })
+         assert.equal(row.k, 1)
+         assert.equal(row.book_k, true)
+      })
+
+      // A CHECK is not a type: an integer restricted to 0 and 1 is still an integer.
+      test('with a CHECK restricting it to 0 and 1', async () => {
+         const row = await integerBesides('CREATE TABLE t (id int primary key, k int check (k in (0, 1)));', {
+            id: 1,
+            k: 1,
+         })
+         assert.equal(row.k, 1)
+      })
+
+      // Nor is a string that happens to read like one.
+      test("beside a DEFAULT whose text reads like a boolean's CHECK", async () => {
+         const row = await integerBesides(
+            "CREATE TABLE t (id int primary key, k int, note text default 'k IN (0, 1)');",
+            { id: 1, k: 1 },
+         )
+         assert.equal(row.k, 1)
+      })
+
+      // A word boundary is not an ASCII question: `ёk` ends with `k` in every sense that matters.
+      test('beside a boolean whose non-ASCII name ends with its own', async () => {
+         const row = await integerBesides('CREATE TABLE t (id int primary key, k int, ёk boolean);', {
+            id: 1,
+            k: 1,
+            ёk: true,
+         })
+         assert.equal(row.k, 1)
+      })
+   })
+
+   /**
+    * The same merge restores the schema a table was declared in, which the SQLite name has folded
+    * into `auth.users`. Asserted because `pins/system.test.ts` no longer can: the shape differs
+    * between the two builds, which is exactly this change.
+    */
+   test('introspection reports a table under its own schema again', async () => {
+      const { app: seeded }: { app: LiteApp } = await newApp()
+      const tables = (await get(seeded, '/_system/introspect')).body.tables as { name: string; schema?: string }[]
+
+      const users = tables.find((t) => t.name === 'users' && t.schema === 'auth')
+      assert.ok(users, `no table named users in schema auth: ${JSON.stringify(tables.map((t) => t.name))}`)
    })
 })

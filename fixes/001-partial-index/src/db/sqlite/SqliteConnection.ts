@@ -17,16 +17,6 @@ interface SqliteConnection {
    exec(query: string): Promise<{ rows?: { name: string; sql: string | null }[] }>
 }
 
-/**
- * Reads the schema out of the database.
- *
- * The index model came from `pragma_index_list` and `pragma_index_info`, which do not report a
- * partial index's predicate — so the model had no `where` field, and the planner rebuilding
- * `CREATE INDEX` from it dropped the predicate even once the DDL translator emitted one.
- *
- * One place covers both sides of the comparison: `diff()` builds the desired schema by executing the
- * translated DDL into an in-memory SQLite and introspecting it with this same code.
- */
 export async function introspect(
    this: SqliteConnection,
    options?: { useCache?: boolean; postprocess?: boolean },
@@ -34,41 +24,39 @@ export async function introspect(
    const introspection = await this.introspectOriginal(options)
    if (!introspection?.indexes?.length) return introspection
 
-   // One query per introspection, not per index.
-   const rows =
+   // `pragma_index_list` and `pragma_index_info` do not report a predicate, so it has to be read
+   // back out of the statement. One query per introspection, not per index.
+   const indexDefinitions =
       (await this.exec("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL")).rows ?? []
 
-   const predicates = new Map<string, string>()
-   for (const row of rows) {
-      const predicate = predicateOf(row.sql)
-      if (predicate) predicates.set(row.name, predicate)
+   const predicateByIndexName = new Map<string, string>()
+   for (const definition of indexDefinitions) {
+      const predicate = extractIndexPredicate(definition.sql)
+      if (predicate) predicateByIndexName.set(definition.name, predicate)
    }
 
-   for (const index of introspection.indexes) index.where = predicates.get(index.name) ?? null
+   for (const index of introspection.indexes) index.where = predicateByIndexName.get(index.name) ?? null
    return introspection
 }
 
 /**
- * Pulls the predicate out of `CREATE INDEX … WHERE …`.
+ * Pulls the predicate out of `CREATE [UNIQUE] INDEX name ON table (…) WHERE …`.
  *
- * `sqlite_schema.sql` keeps the statement roughly as written, so the filter's `WHERE` has to be told
- * apart from any other — and a regular expression cannot, since the word appears as happily inside a
- * string literal, a quoted identifier or a comment:
- *
- *   CREATE INDEX i ON t (note || ' WHERE ') WHERE a > 0
- *
- * So this walks the statement, skipping anything a `WHERE` inside cannot be the filter of. Not a
- * parser: it only needs to know where it is, not what it is reading.
+ * The filter's `WHERE` has to be told apart from any other, and there are two ways to meet one that
+ * is not it: inside quoted text or a comment, and inside the words before the indexed expressions —
+ * `CREATE INDEX індексWHERE ON t (a)` names an index, not a predicate. So the filter is only looked
+ * for after the list of indexed expressions has closed, and quoted runs and comments are skipped
+ * whole. Not a parser: it only needs to know where it is, not what it is reading.
  */
-function predicateOf(sql: string | null): string | null {
+function extractIndexPredicate(sql: string | null): string | null {
    if (!sql) return null
 
-   let depth = 0
+   let parenthesisDepth = 0
+   let indexColumnsClosed = false
+
    for (let i = 0; i < sql.length; i++) {
       const char = sql[i]
 
-      // Anything quoted is skipped whole. SQLite escapes by doubling, which needs no special case:
-      // the closing quote ends the run and the next one opens another.
       if (char === "'" || char === '"' || char === '`') {
          i = skipTo(sql, i + 1, char)
          continue
@@ -88,16 +76,19 @@ function predicateOf(sql: string | null): string | null {
          continue
       }
 
-      if (char === '(') depth++
-      else if (char === ')') depth--
-      // Only at the top level: the index elements are parenthesised, and the filter never is.
-      else if (depth === 0 && isWhereAt(sql, i))
+      if (char === '(') {
+         parenthesisDepth++
+      } else if (char === ')') {
+         parenthesisDepth--
+         if (parenthesisDepth === 0) indexColumnsClosed = true
+      } else if (indexColumnsClosed && parenthesisDepth === 0 && isWhereAt(sql, i)) {
          return (
             sql
                .slice(i + 5)
                .trim()
                .replace(/;$/, '') || null
          )
+      }
    }
    return null
 }
@@ -108,10 +99,16 @@ function skipTo(sql: string, from: number, closing: string): number {
    return end < 0 ? sql.length : end
 }
 
-/** `WHERE` at this position, as a whole word. */
+/** `WHERE` at this position, as a whole word. The boundary is Unicode-aware: SQLite identifiers are. */
 function isWhereAt(sql: string, i: number): boolean {
    if (sql.slice(i, i + 5).toUpperCase() !== 'WHERE') return false
-   const before = sql[i - 1]
-   const after = sql[i + 5]
-   return (i === 0 || !/[A-Za-z0-9_$]/.test(before)) && (after === undefined || !/[A-Za-z0-9_$]/.test(after))
+   return !isWordCharacter(sql[i - 1]) && !isWordCharacter(sql[i + 5])
+}
+
+// Declared once rather than inside the test below: the patcher moves top-level declarations into the
+// function it splices, so a literal here is built per call rather than per character.
+const WORD_CHARACTER = /[\p{L}\p{N}_$]/u
+
+function isWordCharacter(char: string | undefined): boolean {
+   return char !== undefined && WORD_CHARACTER.test(char)
 }

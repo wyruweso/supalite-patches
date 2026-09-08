@@ -367,7 +367,10 @@ function renderBody(
    const func: NodePath<FunctionDeclaration> = fn
 
    // The patch's other top-level declarations — its helpers and constants — move inside the body, so
-   // the readable file can keep them beside the main function rather than nested inside it.
+   // the readable file can keep them beside the main function rather than nested inside it. They are
+   // therefore evaluated on every call: a constant that allocates (`new Set([...])`, an object or a
+   // regular expression literal) is rebuilt each time, so keep those out of anything hot, and out of
+   // helpers called per character or per row.
    const helpers = (program.get('body') as NodePath<Node>[])
       .map((statement) =>
          statement.isExportNamedDeclaration() && statement.node.declaration
@@ -569,6 +572,7 @@ const GLOBALS = new Set([
    'Set',
    'String',
    'Symbol',
+   'TextDecoder',
    'TextEncoder',
    'Uint8Array',
    'undefined',

@@ -1,130 +1,154 @@
 # supalite-patches
 
-Readable patches for [`@supabase/lite`](https://www.npmjs.com/package/@supabase/lite) `0.9.0`, spliced
-into the published bundle: five defect fixes and three capabilities its authors list as unimplemented.
+Five bug fixes and three feature implementations for
+[`@supabase/lite`](https://www.npmjs.com/package/@supabase/lite), with readable TypeScript,
+reproductions, and tests against the published npm package.
 
-Each patch is proven the same way — its assertions **fail on the package from npm and pass with the
-patch applied** — and `pins/`, a suite describing what the published package does, must give the same
-answer on both builds. So "nothing else changes" is a check, not a claim.
+The patches are applied to the bundled JavaScript. Each change has its own implementation, tests,
+and reproduction script, so it can be reviewed without reading the minified bundle.
 
-```
-published   788/879 passed
-patched     879/879 passed
+- [Fixes and their reproductions](FINDINGS.md)
+- [Additional findings from the package review](ADDITIONAL_FINDINGS.md)
+- [Patch implementation and validation](#how-patches-work)
 
-PROVEN: 91 assertions fail on the published build and pass with the patches
-UNTOUCHED: the other 788 assertions behave the same on both
-```
+## Run the project
+
+Requires Node.js 24 or later. The dependency is pinned to `@supabase/lite@0.9.0`.
 
 ```bash
-npm i
-npm test                   # both builds, compared
-npm run verify             # typecheck, lint, then the comparison above
-npm run repro              # what each patch is for, printed on a live build
-npm run install:patches    # swap the bundle inside node_modules/@supabase/lite
+npm ci
+npm test
+```
+
+`npm test` runs the suites against the published package and then against the same package with all
+patches applied. It checks that the differences match those declared by each patch.
+
+| Command                          | Purpose                                                    |
+| -------------------------------- | ---------------------------------------------------------- |
+| `npm run verify`                 | Typecheck, lint, test the patcher, and compare both builds |
+| `npm run repro`                  | Run all reproduction scripts against the installed build   |
+| `npm run repro -- partial-index` | Run one reproduction, selected by its directory name       |
+| `npm run build`                  | Write the patched bundle to `dist-patched/`                |
+| `npm run install:patches`        | Apply all patches to the installed package                 |
+| `npm run uninstall:patches`      | Restore the original package bundle                        |
+
+To compare a reproduction before and after patching:
+
+```bash
+npm run repro -- partial-index
+npm run install:patches
+npm run repro -- partial-index
 npm run uninstall:patches
 ```
 
-After `install:patches` the patched library is reachable through an ordinary
-`import '@supabase/lite'`. The original is kept beside it, so rolling back needs no reinstall.
+While patches are installed, `import '@supabase/lite'` loads the patched build. The installer keeps
+a backup of the original bundle. Run the comparison suite before installing patches or
+after uninstalling them, so its baseline is the published package.
 
-## What is patched
+## Included changes
 
-| fix     | defect ([details](FINDINGS.md))                                                  |
-| ------- | -------------------------------------------------------------------------------- |
-| FIX-001 | a partial index loses its `WHERE`, so the database rejects rows Postgres accepts |
-| FIX-002 | every RLS refusal and constraint violation comes back as `500 SUP`               |
-| FIX-003 | arrays and `jsonb` arrive as JSON strings, `boolean` as `0`/`1` — fixed upstream in `0.9.1-next.2` |
-| FIX-004 | publication statements are emitted mangled or refused, and kill the migration    |
-| FIX-005 | triggers never reach the database through the migrator                           |
+### Fixes
 
-| feature  | capability          | their own estimate |
-| -------- | ------------------- | ------------------ |
-| FEAT-001 | `signInAnonymously` | planned, `S`       |
-| FEAT-002 | admin users API     | planned, `M`       |
-| FEAT-003 | TOTP second factor  | planned, `M`       |
+| Patch                                        | Change                                                                                                |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| [FIX-001](fixes/001-partial-index/)          | Preserve partial-index `WHERE` clauses through translation, schema comparison, and migration planning |
+| [FIX-002](fixes/002-client-errors-as-500/)   | Map unhandled RLS refusals and constraint violations to client errors                                 |
+| [FIX-003](fixes/003-value-types/)            | Return arrays and `jsonb` as JSON values, and booleans as `true`/`false`                              |
+| [FIX-004](fixes/004-publication-statements/) | Accept publication statements in imported schemas without generating invalid SQLite DDL               |
+| [FIX-005](fixes/005-triggers-in-migration/)  | Include trigger additions, changes, and removals in migrations                                        |
 
-The features come from the package's own `FEATURES.md`, picked for being marked planned rather than
-infeasible, carrying no blocker, and being visible over HTTP so they can be demonstrated.
+The five patches address the eight defects described in [FINDINGS.md](FINDINGS.md). FIX-003 was also
+fixed upstream in `0.9.1-next.2`.
 
-FIX-004 accepts publication statements for schema compatibility and ignores them; it does **not**
-implement Supabase Realtime. SQLite has no logical replication for a publication to mean anything in,
-so the point is that a schema exported from a project using Realtime migrates instead of dying on the
-lines that configure it.
+FIX-002 converts the driver's error codes to SQLSTATE values, so the package's existing error mapping
+answers them; it does not add a second mapping alongside it. `SQLITE_CONSTRAINT_DATATYPE` is left
+out, and [FINDINGS.md](FINDINGS.md) records why.
 
-## One directory per patch
+FIX-004 skips publication statements after accepting them, across all five statement forms —
+`CREATE`, `ALTER`, `DROP`, `RENAME TO` and `OWNER TO`. It supports importing a Supabase schema; it
+does not implement Realtime or logical replication.
 
-```
-fixes/002-client-errors-as-500/
-   patch.ts                  where in the bundle, and which assertions must diverge
-   src/server/data.ts        the readable code, at the path its target occupies
-   test.ts                   asserts the CORRECT behaviour, so it fails on the published build
-   repro.ts                  prints the defect on a live build
-```
+FIX-005 drops triggers before tables are rebuilt and recreates them afterwards. SQLite keeps a
+trigger that references a rebuilt table, and validating the schema then fails the migration.
 
-`src/server/data.ts` is the artefact to review: an ordinary TypeScript file at the path its target
-occupies in the source tree. `lib/patcher.ts` takes the exported function from it and splices it into
-the minified bundle — there is no patch code inside the patcher.
+### Features
 
-A reproduction derives its verdict from what it observed, so the same script reads `AS DESCRIBED` on
-the published build and `DIFFERS` on the patched one.
+| Feature                                     | Implemented scope                                                                |
+| ------------------------------------------- | -------------------------------------------------------------------------------- |
+| [FEAT-001](features/001-anonymous-sign-in/) | Anonymous sign-in, refreshable sessions, and the `is_anonymous` claim            |
+| [FEAT-002](features/002-admin-user-api/)    | Admin user listing, lookup, creation, and deletion                               |
+| [FEAT-003](features/003-mfa-totp/)          | TOTP enrollment, challenge, verification, factor listing, and `aal`/`amr` claims |
 
-`pins/` holds the rest of the suite: 771 assertions describing the published package as it is,
-defects included. They are not there to pass — they are there to stay identical across both builds,
-so a patch that reached further than its own directory shows up as a diverging assertion nobody
-declared.
+These capabilities were listed as planned in the package's `FEATURES.md`. The admin implementation
+does not include user updates, bans, link generation, or MFA admin routes. The TOTP implementation
+does not include unenrollment, QR generation, or phone factors.
 
-## How a patch works
+Two behaviors are worth naming, because they are security-relevant rather than optional:
 
-**Finding the place.** What survived minification decides what can be searched for — class method
-names, field and object keys and string literals did; function, variable and parameter names did not.
-So a patch names its target structurally (`methodNamed('IndexStmt', 'IndexElem')`,
-`functionWithText('42P17')`, `functionReturningObject([...])`), and an anchor matching anything other
-than exactly one candidate fails the build.
+- FEAT-002's soft delete replaces the user's identifiers with a digest, as GoTrue does, so a deleted
+  address does not stay registered. It keeps the row and its id.
+- FEAT-003 requires `aal2` to enroll or verify a further factor once one is verified. Without that
+  check, a session holding only the password can enroll a factor of its own and reach `aal2`.
 
-**Substituting names.** The readable code calls `quoteIdentifier`; the bundle calls it `Qo`. Nothing is
-hardcoded: parameters map positionally, module functions are found by a characteristic call, and a
-module variable is recovered from the literal beside it in a call. An error factory is the exception
-that is found by its message instead — it is called from everywhere, so there is no one call to read
-its name off, and raising the library's own error is what puts a 400 where a 500 would otherwise be.
+## Reviewing a patch
 
-**Splicing.** Only the body of the located function is replaced, so the other 500 KB come through byte
-for byte. `wrapFunction` and `wrapMethod` rename the original and put a short wrapper in its place,
-for a small change to a large function; wrappers stack, and `plan` is wrapped by both FIX-001 and
-FIX-005.
+Each directory under `fixes/` or `features/` follows the same layout:
 
-**Data, not only code.** Some of what the library is, is a string: the auth schema is one long DDL
-constant, and a feature needing a table has to put it there. A table created any other way exists on
-the live database and is absent from the schema the migrator builds to compare against, so the next
-migration plans to drop it. `appendToConstant` finds that constant by something it contains and
-re-quotes it from its own parsed value; an interpolated template is refused rather than mangled.
+| File          | What to look for                                                               |
+| ------------- | ------------------------------------------------------------------------------ |
+| `src/**/*.ts` | The replacement or wrapper implementation, under the corresponding source path |
+| `patch.ts`    | Where to apply it and which test outcomes are expected to change               |
+| `test.ts`     | Behavior exercised through the package's API                                   |
+| `repro.ts`    | A runnable example showing the change                                          |
 
-**What it refuses.** Renaming is by name rather than by binding, because some names are free — declared
-in the patch, defined by the bundle. `test/patcher.test.ts` pins the three guards that buys: a
-reference to something outside the patch, a parameter count that no longer matches, and **capture**,
-where a name renamed into the body collides with one the patch declared itself.
+Start with a patch's `src/` and `test.ts`. The [pins/](pins/) suites record other behavior of the
+published package, including known defects. They help detect changes beyond those declared by the
+patches.
 
-## Patches are independent
+## How patches work
 
-Every `patch.ts` is a plain `apply(source) => source`, so any subset works in any order: each anchor
-searches the text it is given, and a patch applied second finds its place in a bundle the first has
-already changed. Verified both ways round.
+[lib/patcher.ts](lib/patcher.ts) locates code using names and literals that survive minification,
+such as class methods, neighboring methods, and route paths. An anchor must identify exactly one
+target. The patcher resolves references to bundle symbols and checks for missing references,
+parameter mismatches, and name collisions.
+
+A patch can replace a function body or wrap the existing implementation. Schema additions use
+`appendToConstant` to extend the library's auth DDL, so the migration system sees the new tables.
+The patcher's own tests are in [test/patcher.test.ts](test/patcher.test.ts).
+
+Top-level declarations in a patch's source move inside the function being spliced, so they are
+evaluated on every call. Constants that allocate belong outside a hot path.
+
+Each `patch.ts` exports `apply(source) => source`. The standard build and test commands apply the
+full set. Each patch's own `test.ts` also passes with only that patch applied, which is how the
+suites are kept from depending on one another; a custom subset or order beyond that needs its own
+validation.
+
+Passing the comparison suite confirms the declared differences for the cases it exercises. It does
+not establish that every other behavior is unchanged.
 
 ## Version compatibility
 
-Verified against `0.9.0` and `0.9.1-next.1`; any other version is refused by name rather than failing
-somewhere inside Babel.
+| Package version | Status                                                                              |
+| --------------- | ----------------------------------------------------------------------------------- |
+| `0.9.0`         | Pinned dependency and baseline for the findings and tests                           |
+| `0.9.1-next.1`  | Also accepted by the build and installer                                            |
+| `0.9.1-next.2`  | Reviewed separately; not enabled in the build                                       |
+| `0.10.0`        | Current `latest`; reviewed separately; not enabled in the build                     |
+| `0.10.1-next.2` | Current `next`; reviewed separately; not enabled in the build                       |
 
-Two prereleases have appeared since, and all eight patches applied to both without changes.
+[apply.ts](apply.ts) defines the accepted versions and rejects others.
 
-`0.9.1-next.2` fixes one of the defects: FIX-003 is no longer needed there, and its assertions pass on
-the published build. The other four defects and all three capabilities are unchanged. That release
-also reworks storage — bucket creation now requires `id` as well as `name` and is subject to RLS, and
-`storage` is no longer an exposed REST schema — so `pins/`, which describes `0.9.0`, reports those as
-differences by design.
+All eight patches applied to each reviewed version without changes. `0.10.0` produced the same
+comparison results as `0.9.1-next.2`, in the same bundle size, so the `0.9` to `0.10` change is the
+storage rework below. Of the defects recorded here, `0.9.1-next.2` and later fix FIX-003 and
+`CREATE EXTENSION` translation; the rest were still present when re-measured on `0.10.0`.
 
-## Licence
+The reviewed versions also change storage: bucket creation requires both `id` and `name` and is
+subject to RLS, and `storage` is no longer an exposed REST schema. These differ from the `0.9.0`
+behavior recorded in `pins/`, which is why the newer versions are not enabled in the build.
 
-Apache-2.0, the same licence as `@supabase/lite` itself. The parts that replace, wrap or characterise
-the package are derivative works of it, and `NOTICE` says which and credits Supabase. The published
-package is not redistributed here: it is installed from npm, patched in place, and the patched build
-stays local.
+## License
+
+[Apache-2.0](LICENSE). [NOTICE](NOTICE) records attribution to Supabase and identifies the derivative
+parts of this project. The published package is installed from npm; patched bundles stay local.

@@ -10,9 +10,19 @@ describe('FIX-004 publication statements do not reach the DDL', () => {
       assert.equal((await translate('ALTER PUBLICATION supabase_realtime ADD TABLE messages;')).trim(), '')
    })
 
-   // ADD, SET and DROP share one node type, so covering the type covers the variants.
+   // ADD, SET and DROP share one node type, so covering the type covers those variants.
    test('ALTER PUBLICATION DROP TABLE translates to nothing', async () => {
       assert.equal((await translate('ALTER PUBLICATION supabase_realtime DROP TABLE messages;')).trim(), '')
+   })
+
+   // RENAME and OWNER do not: they are a RenameStmt and an AlterOwnerStmt, and each has to be read
+   // by the kind of object it names. Both threw before this.
+   test('ALTER PUBLICATION RENAME TO translates to nothing', async () => {
+      assert.equal((await translate('ALTER PUBLICATION supabase_realtime RENAME TO realtime;')).trim(), '')
+   })
+
+   test('ALTER PUBLICATION OWNER TO translates to nothing', async () => {
+      assert.equal((await translate('ALTER PUBLICATION supabase_realtime OWNER TO postgres;')).trim(), '')
    })
 
    test('CREATE PUBLICATION translates to nothing', async () => {
@@ -77,5 +87,34 @@ describe('FIX-004 publication statements do not reach the DDL', () => {
       assert.match(await translate('DROP VIEW v;'), /DROP VIEW v/)
 
       await assert.rejects(() => translate('DROP SCHEMA s;'), /not supported in SQLite/)
+   })
+
+   // The same guard for the two node types added with RENAME and OWNER.
+   test('renaming something that is not a publication still translates', async () => {
+      assert.match(await translate('CREATE TABLE t (id int primary key); ALTER TABLE t RENAME TO t2;'), /RENAME TO/)
+      await assert.rejects(() => translate('ALTER TYPE mood RENAME TO feeling;'), /not supported in SQLite/)
+   })
+
+   /**
+    * Changing only the publication is not a schema change: the plan is empty and the rows that were
+    * there are still there. The statements are dropped in translation, so there is nothing for the
+    * differ to see — which is the property that makes ignoring them safe rather than merely quiet.
+    */
+   test('changing only the publication plans nothing and keeps the rows', async () => {
+      const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
+      const table = 'CREATE TABLE messages (id int primary key, body text);\n'
+
+      await (await connection.createMigrator(table)).migrate()
+      await connection.exec("INSERT INTO messages (id, body) VALUES (1, 'kept')")
+
+      const { diff, plan } = (await (
+         await connection.createMigrator(`${table}ALTER PUBLICATION supabase_realtime ADD TABLE messages;`)
+      ).diff()) as { diff: { has_changes: boolean }; plan?: { steps: unknown[] } }
+
+      assert.equal(diff.has_changes, false)
+      assert.deepEqual(plan?.steps ?? [], [])
+
+      const rows = (await connection.exec('SELECT body FROM messages')) as { rows: { body: string }[] }
+      assert.deepEqual((rows.rows ?? []).map((r) => r.body), ['kept'])
    })
 })

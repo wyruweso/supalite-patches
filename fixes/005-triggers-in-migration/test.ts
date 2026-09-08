@@ -98,21 +98,94 @@ describe('FIX-005 triggers survive a migration', () => {
    })
 
    /**
-    * Where the trigger steps run, not only whether. The original's plan ends `COMMIT;` then
-    * `PRAGMA foreign_keys=ON;`, so appended steps run outside the transaction — a trigger failing to
-    * create would leave the table changes committed and the schema half applied.
+    * SQLite drops a table's own triggers with the table, but a trigger on *another* table that
+    * mentions it survives the drop — and the rebuild's `ALTER TABLE … RENAME` then validates the
+    * whole schema and fails:
+    *
+    *    error in trigger on_src_insert: no such table: main.dst
+    *
+    * The trigger sits on `src`; the table being rebuilt is `dst`. Nothing about the trigger changes,
+    * which is what makes it easy to miss: there is no trigger change for a diff to notice.
     */
-   test('trigger steps run inside the migration transaction', async () => {
-      const { connection } = await migrate(TABLES)
-      const { plan } = await (await connection.createMigrator(COPY)).diff()
+   describe('a rebuild of a table a trigger writes to', () => {
+      const crossTable = (dstColumn: string, withTrigger = true) =>
+         [
+            'CREATE TABLE src (id int primary key, name text);',
+            `CREATE TABLE dst (id int primary key, name text, n ${dstColumn});`,
+            ...(withTrigger
+               ? [
+                    `CREATE FUNCTION copy_row() RETURNS trigger AS $$ BEGIN INSERT INTO public.dst (id, name) VALUES (NEW.id, NEW.name); RETURN NEW; END; $$ LANGUAGE plpgsql;`,
+                    'CREATE TRIGGER on_src_insert AFTER INSERT ON src FOR EACH ROW EXECUTE FUNCTION copy_row();',
+                 ]
+               : []),
+         ].join('\n')
 
-      const types = plan.steps.map((s: { type: string }) => s.type)
-      const commit = types.indexOf('commit_transaction')
-      const trigger = types.findIndex((t: string) => t === 'add_trigger' || t === 'drop_trigger')
+      test('succeeds with the trigger left in place', async () => {
+         const { connection } = await migrate(crossTable('int'))
+         await connection.exec("INSERT INTO src (id, name) VALUES (1, 'a')")
 
-      assert.notEqual(trigger, -1, 'no trigger step was planned')
-      assert.notEqual(commit, -1, 'the plan has no commit to be inside of')
-      assert.ok(trigger < commit, `trigger step at ${trigger} runs after the commit at ${commit}`)
+         await (await connection.createMigrator(crossTable('text'))).migrate({ force: true })
+
+         assert.deepEqual(
+            (await rows(connection, "SELECT name FROM sqlite_master WHERE type='trigger'")).map((r) => r.name),
+            ['on_src_insert'],
+         )
+         // And it still fires against the rebuilt table.
+         await connection.exec("INSERT INTO src (id, name) VALUES (2, 'b')")
+         assert.deepEqual(
+            (await rows(connection, 'SELECT name FROM dst ORDER BY id')).map((r) => r.name),
+            ['a', 'b'],
+         )
+      })
+
+      // The same rebuild while the trigger is being removed: its DROP has to come first as well.
+      test('succeeds while the trigger is being removed', async () => {
+         const { connection } = await migrate(crossTable('int'))
+         await connection.exec("INSERT INTO src (id, name) VALUES (1, 'a')")
+
+         await (await connection.createMigrator(crossTable('text', false))).migrate({ force: true })
+
+         assert.deepEqual(await rows(connection, "SELECT name FROM sqlite_master WHERE type='trigger'"), [])
+      })
+   })
+
+   /**
+    * Atomicity, asserted by breaking a migration rather than by reading the plan. `migratePlan`
+    * strips the plan's own transaction markers and runs every remaining statement inside one
+    * transaction of its own, so where a step sits relative to `COMMIT;` proves nothing — only a
+    * failure does.
+    *
+    * The failure is arranged after the trigger has been dropped: a NOT NULL column added to a table
+    * that already has rows, which the rebuild's copy refuses.
+    */
+   test('a failed migration takes the trigger changes back with it', async () => {
+      const withRequired = COPY.replace(
+         'CREATE TABLE dst (id int primary key, name text);',
+         'CREATE TABLE dst (id int primary key, name text, req text not null);',
+      )
+      assert.notEqual(withRequired, COPY, 'the schema under test did not change')
+
+      const { connection } = await migrate(COPY)
+      await connection.exec("INSERT INTO dst (id, name) VALUES (1, 'kept')")
+
+      const types = ((await (await connection.createMigrator(withRequired)).diff()).plan.steps as { type: string }[])
+         .map((s) => s.type)
+      assert.ok(types.indexOf('drop_trigger') < types.indexOf('copy_data'), `steps: ${types.join(', ')}`)
+
+      await assert.rejects(
+         async () => (await connection.createMigrator(withRequired)).migrate({ force: true }),
+         /NOT NULL constraint failed/,
+      )
+
+      assert.deepEqual(
+         (await rows(connection, "SELECT name FROM sqlite_master WHERE type='trigger'")).map((r) => r.name),
+         ['on_src_insert'],
+         'the dropped trigger was not restored by the rollback',
+      )
+      assert.deepEqual(
+         (await rows(connection, 'SELECT name FROM dst')).map((r) => r.name),
+         ['kept'],
+      )
    })
 
    /**
@@ -140,7 +213,7 @@ describe('FIX-005 triggers survive a migration', () => {
       const { plan } = await (await connection.createMigrator(COPY)).diff()
 
       const churn = (plan.steps ?? []).filter(
-         (s: { type: string }) => s.type === 'add_trigger' || s.type === 'drop_trigger',
+         (s: { type: string }) => s.type === 'create_trigger' || s.type === 'drop_trigger',
       )
       assert.deepEqual(churn, [], 'an unchanged trigger was recreated')
    })

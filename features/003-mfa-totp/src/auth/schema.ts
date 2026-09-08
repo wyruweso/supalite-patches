@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS auth.mfa_factors (
   challenge_id          text,
   challenge_expires_at  text,
   challenge_attempts    integer NOT NULL DEFAULT 0,
+  -- The last time step a code was accepted for. RFC 6238 5.2 requires an OTP to be usable once, and
+  -- clearing the challenge alone does not give that: a second challenge would accept the same code
+  -- for the rest of its 30 seconds. Compared and written in the statement that consumes a challenge.
+  last_verified_step    integer NOT NULL DEFAULT 0,
   created_at            timestamptz DEFAULT now(),
   updated_at            timestamptz DEFAULT now()
 );

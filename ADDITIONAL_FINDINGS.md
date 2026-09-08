@@ -1,364 +1,409 @@
 # Additional findings
 
-Defects in the published `@supabase/lite@0.9.0` that these patches do **not** fix. `FINDINGS.md`
-lists the eight that are fixed; these are the rest of what the survey turned up, ordered by how much
-damage they do rather than by where they live.
+Additional defects, limitations, and compatibility differences observed in the published
+`@supabase/lite@0.9.0` package. The five fixes are documented separately in [FINDINGS.md](FINDINGS.md).
 
-Order inside each group is reach times severity, not severity alone: a total failure that only a
-few schemas can reach ranks below a partial one that almost every project walks into.
+Examples below describe the unpatched package. Version changes and related feature implementations
+are noted where relevant. Links to `pins/` point to tests that record the observed behavior.
 
-Everything here was measured against the package from npm. Nothing is repaired, so nothing here has
-a reproduction beside a patch — the commands quoted are what was run to establish each one.
+Everything here was re-measured on `0.10.0`, the current `latest`. Only `CREATE EXTENSION`
+translation (item 2) is fixed there; the rest were reproduced unchanged.
 
----
+## Request and migration failures
 
-## Severe — a whole capability is unusable, or data is refused that should not be
+### 1. Missing JWT claims cause RLS errors; issued tokens omit metadata
 
-### 1. Claim-based RLS cannot work, in two halves
-
-The idiom Supabase's own documentation gives for reading a custom claim:
+A policy can be accepted during migration and fail later when the caller's JWT lacks a referenced
+claim:
 
 ```sql
-CREATE POLICY p ON notes FOR ALL USING (team = auth.jwt() ->> 'team') WITH CHECK (true);
+CREATE POLICY p ON notes FOR ALL
+  USING (team = auth.jwt() ->> 'team')
+  WITH CHECK (true);
 ```
 
-**The first half.** It is accepted by the migrator, the table is created, and then every read of that
-table returns `{"code":"SUP","message":"Error: Unresolved variable: {{auth.jwt.team}}"}`. The
-translator turns the accessor into a placeholder and `resolvePlaceholder` raises when the path is
-missing. Postgres evaluates `auth.jwt() ->> 'team'` to NULL, `team = NULL` is NULL, and the row is
-filtered out — so an anonymous caller, or any user whose token happens not to carry that claim, gets
-a 500 rather than an empty result.
+A read with no `team` claim returns `500`:
 
-What makes this costly is the timing. Every other unsupported policy construct is refused during
-migration, by name, while the deployment can still stop:
-
-| construct           | refused at | message                                              |
-| ------------------- | ---------- | ---------------------------------------------------- |
-| `BETWEEN`           | migration  | `Unsupported expression: A_Expr kind: AEXPR_BETWEEN` |
-| `current_setting()` | migration  | `Unsupported expression: FuncCall: current_setting`  |
-| `COALESCE`          | migration  | `Unsupported expression: deparseValue: CoalesceExpr` |
-| `auth.jwt() ->> …`  | **never**  | migrates, then 500s whenever the claim is absent     |
-
-**The second half.** The claim can never be present. A signup that supplies metadata stores it and
-returns it, but the access token holds seven claims and none of them is the metadata:
-
-```jsonc
-user.user_metadata   // { "team": "red", … }  — stored and returned
-access_token payload // { sub, aud, role, email, session_id, iat, exp }
+```json
+{ "code": "SUP", "message": "Error: Unresolved variable: {{auth.jwt.team}}" }
 ```
 
-Hosted Supabase puts both metadata objects into the token; that is the mechanism the idiom depends
-on. So repairing the 500 alone would turn every such policy into one that admits nobody.
+The translator creates a placeholder for the claim, and the resolver throws when it cannot find
+the value. PostgreSQL evaluates the missing claim as `NULL`, which causes this policy to filter out
+the row. The problem is missing-claim handling, rather than every use of `auth.jwt()`.
 
-### 2. `CREATE EXTENSION` is passed through verbatim and kills the migration
+There is a separate limitation in token generation. Signup metadata is stored and returned on the
+user, but the access token omits both `user_metadata` and `app_metadata`:
 
-A statement with no SQLite equivalent was emitted word for word into DDL that is then executed:
-
+```text
+user.user_metadata:  { "team": "red", ... }
+access token claims: sub, aud, role, email, session_id, iat, exp
 ```
+
+Policies cannot read metadata that the token does not contain. Fixing the missing-claim error alone
+would not make that metadata available. Signup metadata belongs under `user_metadata`; a top-level
+`team` claim would need to be supplied separately.
+
+Other unsupported policy expressions fail earlier, during migration:
+
+| Expression          | Translation error                                    |
+| ------------------- | ---------------------------------------------------- |
+| `BETWEEN`           | `Unsupported expression: A_Expr kind: AEXPR_BETWEEN` |
+| `current_setting()` | `Unsupported expression: FuncCall: current_setting`  |
+| `COALESCE`          | `Unsupported expression: deparseValue: CoalesceExpr` |
+
+Tests: [RLS expressions](pins/rls-expressions.test.ts), [JWT contents](pins/auth.test.ts).
+
+### 2. `CREATE EXTENSION` reaches SQLite unchanged
+
+```sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE t (id uuid primary key default gen_random_uuid(), name text);
-
-0.9.0          migration FAILED: near "EXTENSION": syntax error
-0.9.1-next.1   migration succeeded
 ```
 
-That line opens very nearly every Supabase migration. `DROP EXTENSION` was refused *at translation*
-in the same version — loudly, and while the deployment could still stop — so the asymmetry is what
-made this silent.
+In `0.9.0`, the translator passes `CREATE EXTENSION` through unchanged. Executing the migration then
+fails with `near "EXTENSION": syntax error`. `DROP EXTENSION` is rejected during translation.
 
-**Not ours.** Found by comparing against `0.9.1-next.1`, where it is already fixed: extension
-statements now translate to nothing. Recorded because `0.9.0` is the version under study, and because
-of the 754 assertions describing it, this is the one that changed.
+**Version note:** the comparison with `0.9.1-next.1` found this fixed upstream: extension statements
+translate to no SQLite DDL. The observation is retained here for the `0.9.0` baseline.
 
-### 3. `bytea` columns cannot be written through REST at all
+Test: [DDL translation](pins/ddl-translation.test.ts).
 
-The translation is correct — the column really is a SQLite `BLOB`, and binary written straight
-through the connection is stored properly. What is missing is any serialisation from a JSON request
-body to bytes, so every spelling a client could send is refused:
+### 3. `bytea` has no REST binary conversion
 
-| sent as                                       | result                                                       |
-| --------------------------------------------- | ------------------------------------------------------------ |
-| `"\x48656c6c6f"` (Postgres's own hex literal) | `500` — `cannot store TEXT value in BLOB column files.blob`  |
-| `"Hello"`                                     | `500` — same                                                 |
-| `"SGVsbG8="` (base64)                         | `500` — same                                                 |
-| `[72, 101, 108]`                              | `500` — `Cannot bind value at parameter …: unsupported type` |
-| `null`                                        | `201` — the only value that works                            |
+A `bytea` column translates to SQLite `BLOB`, and binary values can be written through the
+connection. The tested JSON representations fail through REST:
 
-Reading does not round-trip either: bytes inserted through the connection come back as a
-numeric-keyed object, a `Uint8Array` that went through `JSON.stringify` — `[{"blob":{"0":222,"1":173}}]`.
+| JSON value                                       | Result                                    |
+| ------------------------------------------------ | ----------------------------------------- |
+| `"\x48656c6c6f"` (PostgreSQL hex representation) | `500`: cannot store TEXT in a BLOB column |
+| `"Hello"`                                        | Same TEXT-to-BLOB error                   |
+| `"SGVsbG8="` (base64)                            | Same TEXT-to-BLOB error                   |
+| `[72, 101, 108]`                                 | `500`: unsupported parameter type         |
+| `null`                                           | `201`                                     |
 
-**Impact:** from a REST client a `bytea` column is write-only-as-null and read-only-as-noise.
+Reads also lack a binary encoding. Bytes inserted through the connection come back as a
+numeric-keyed object:
 
-### 4. A non-ASCII table name makes every filtered request a 500
-
-Postgres accepts Unicode identifiers and so does PostgREST, so `CREATE TABLE книги (…)` is an
-ordinary schema. It translates, it accepts writes, and a bare read works. Add any query parameter and
-the same request fails:
-
-```
-GET /rest/v1/книги            → 200  [{"id":1,"name":"x"}]
-GET /rest/v1/книги?select=id  → 500  TypeError: Cannot convert argument to a ByteString
-                                     because the character at index 1 has a value of 1082
-GET /rest/v1/книги?id=eq.1    → 500  the same
+```json
+[{ "blob": { "0": 222, "1": 173 } }]
 ```
 
-1082 is `к`. The response carries `Content-Location: /<table>?<query>`, header values are ByteStrings,
-and the table name in the path is never percent-encoded — while the query string is, so a Cyrillic
-*value* is handled correctly. The header is only set when there is a query string, which is why the
-bare read escapes.
+The REST interface needs conversion between its JSON representation and the stored bytes.
 
-**How often this is reached** is the reason it sits here and not higher: most schemas are written in
-ASCII, and a project that never names a table in its own language never meets this. When it is met,
-nothing works and nothing suggests a cause.
+PostgreSQL accepts the hex representation, so the correct answer to the first row is a successful
+insert rather than a different status code. [FIX-002](fixes/002-client-errors-as-500/) leaves
+`SQLITE_CONSTRAINT_DATATYPE` unmapped for that reason: reporting a client error here would describe a
+missing conversion as bad input.
 
-**Impact:** any schema whose identifiers are not English breaks on its first filtered request, and
-breaks late — the rows are fetched and the failure happens while the response headers are assembled,
-so the error names a ByteString conversion rather than anything the caller did.
+Tests: [REST value handling](pins/postgrest-values.test.ts).
 
-### 5. A storage adapter is written at one version and read at another
+### 4. Cyrillic table names fail when a query string is present
 
-Every `StorageAdapter` method takes `version` as its third argument and `storage.objects` carries a
-`version` column re-rolled on each write. The pairing invites an adapter to key on it — which is what
-immutable object versioning is for, and how an S3-backed adapter stops a CDN serving stale bytes.
+A table named `книги` can be created and written to. A read succeeds until a query parameter is added:
 
-The two sides disagree:
-
-```js
-await this.adapter.uploadObject(bucketId, path, void 0, body, …)   // always undefined
-await this.adapter.getObject(bucketId, path, obj.version ?? void 0) // the UUID from the row
+```text
+GET /rest/v1/книги            -> 200 [{"id":1,"name":"x"}]
+GET /rest/v1/книги?select=id  -> 500 TypeError: Cannot convert argument to a ByteString
+GET /rest/v1/книги?id=eq.1    -> 500, same error
 ```
 
-```
-uploadObject   version = undefined         → key  b/a.txt@none
-getObject      version = "a97eb2c5-…"      → key  b/a.txt@a97eb2c5-…   → 500
-still in the store: [ 'b/a.txt@none' ]
-```
+For requests with a query string, the response sets `Content-Location` using the table name without
+percent-encoding it. Characters such as `к` exceed the header's ByteString range, so the failure
+occurs while building the response headers, after the query has run.
 
-`copyObject` has the same shape. **Impact:** only adapters that ignore `version` work — that is, only
-adapters that do not version. Easy to misdiagnose as a key-derivation mistake in your own adapter,
-which is how it was first written off here.
-### 6. `quote()` does not escape embedded quotes
+Unicode values in query parameters are percent-encoded correctly; this example concerns the table
+name in the generated header.
+
+Tests: [Content-Location handling](pins/postgrest-negotiation.test.ts).
+
+### 5. Storage writes and reads use different object versions
+
+The adapter receives different version values for the same object:
+
+| Operation      | Version argument                             |
+| -------------- | -------------------------------------------- |
+| `uploadObject` | `undefined`                                  |
+| `getObject`    | The UUID stored in `storage.objects.version` |
+
+An adapter that includes the version in its object key writes `b/a.txt@none` and later tries to read
+`b/a.txt@<uuid>`. The read fails even though the uploaded object is still in the store. `copyObject`
+has the same mismatch.
+
+Adapters that ignore the version argument avoid this problem, but cannot use it for object versioning.
+
+Tests: [storage adapter versions](pins/storage.test.ts).
+
+### 6. `quote()` leaves embedded double quotes unescaped
 
 ```js
 quote('tbl') // '"tbl"'
-quote('we"ird') // '"we"ird"'   ← malformed
+quote('we"ird') // '"we"ird"'
 ```
 
-Correct SQL escaping doubles the inner quote. This is not only an exported helper: the differ uses it
-to build `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE … ADD COLUMN` and `DROP INDEX` from identifiers
-that came out of the user's Postgres DDL. Reachable end to end:
+The second result should be `"we""ird"`. The migration planner uses this helper when generating DDL,
+so an identifier containing a double quote can produce invalid SQL:
 
-```
-ALTER TABLE "we"ird" ADD COLUMN "extra" text;   →   near "ird": syntax error
-```
-
-**Impact:** identifier names containing a double quote produce malformed — and in principle
-attacker-shaped — DDL. It also blocks two things a patch would otherwise reach: an index whose name
-contains a quote cannot be created at all, so the readers that handle doubled quotes correctly are
-right for inputs this build cannot yet produce.
-
----
-
-## Moderate — correct results, wrong cost; or a silent wrong answer in a narrow case
-
-### 7. DDL applied through `exec()` leaves the schema cache stale
-
-The PostgREST schema cache is populated on the first request. A table created afterwards through
-`connection.exec()` is invisible for the lifetime of the app:
-
-```
-PGRST205  Could not find the table 'docs' in the schema cache
-          Perhaps you meant the table 'public.books'
+```sql
+ALTER TABLE "we"ird" ADD COLUMN "extra" text;
 ```
 
-The error reads as "no such table" rather than "stale cache", and the hint points elsewhere. Two
-mitigations exist and are easy to miss: `diff()` re-reads the schema, so the **migrator** path
-refreshes the cache by itself, and `Connection.clearSchemaCache()` is exported and works.
+The observed migration fails with `near "ird": syntax error`.
 
-### 8. Adding an index rewrites the entire table
+Test: [SQL helpers](pins/utils.test.ts).
 
-Migrating from a schema to the same schema plus one `CREATE INDEX` produces a diff in which nothing
-about the table changed — `tables: []`, `columns: []`, only `indexes: [{type:"added"}]` — and then a
-plan that copies every row through a temporary table anyway:
+## Schema handling and API behavior
 
-```
-disable_foreign_keys → begin_transaction → create_table "_t_migrate_new" → copy_data
-→ drop_table "t" → rename_table → add_index → commit_transaction → enable_foreign_keys
-```
+### 7. DDL through `exec()` leaves the schema cache stale
 
-The rebuild is the right answer for a dropped column or a changed type. `CREATE INDEX` is a single
-statement SQLite has always supported, and the `add_index` step at the end is the only one needed.
+After the first REST request populates the schema cache, a table created through `connection.exec()`
+is not visible to subsequent REST requests:
 
-**Impact:** adding an index to a large table costs a full copy of it, the disk for a second copy, and
-a window with foreign keys disabled. The result is correct; the cost is not.
-
-### 9. An expression index cannot survive the migrator
-
-`pragma_index_info` reports NULL for a column that is an expression, and nothing puts anything else
-there, so the schema model records the column as `null` — and the planner then quotes it:
-
-```
-CREATE UNIQUE INDEX k ON t (a, (nullif(n, '')))     ← what was asked for
-model:   {"name":"k","columns":["a",null], …}
-planned: CREATE UNIQUE INDEX "k" ON "t" ("a","null");
-         no such column: "null"
+```text
+PGRST205: Could not find the table 'docs' in the schema cache
 ```
 
-The spelling does not matter — `nullif(...)`, a `CASE` expression, a mixed index of one plain column
-and one expression all fail the same way. Translation is not at fault: the DDL that comes out is
-correct, and executing it directly through `exec()` works. Only the plan-and-rebuild path is broken.
+The table exists in SQLite, but the cached schema has not been refreshed. Calling
+`Connection.clearSchemaCache()` makes it visible. The migrator's `diff()` also re-reads the schema,
+so that path refreshes the cache.
 
-It bites when an expression index is a **change to be planned**. A schema applied outside that path,
-or one where both sides already carry the index, never emits the step — which is why the MFA schema
-added by `FEAT-003` can use `(NULLIF(friendly_name, ''))` safely.
+### 8. Adding an index rebuilds the table
 
-### 10. A CSV row with too many fields is silently truncated
+Adding only a `CREATE INDEX` statement produces a diff with no table or column changes. The plan
+still creates a temporary table, copies the rows, drops the original, renames the copy, and finally
+creates the index.
 
+SQLite supports creating an index directly. The extra rebuild adds a full table copy, temporary
+storage, and a period with foreign-key checks disabled.
+
+Test: [migration plans](pins/migration-plan.test.ts).
+
+### 9. Migration planning loses index expressions
+
+Expression indexes translate correctly and work when the translated DDL is executed directly. The
+schema model loses the expression when the index is introspected:
+
+```sql
+CREATE UNIQUE INDEX k ON t (a, (nullif(n, '')));
 ```
-POST /rest/v1/authors    Content-Type: text/csv
+
+```text
+Introspected columns: ["a", null]
+Planned SQL:          CREATE UNIQUE INDEX "k" ON "t" ("a", "null");
+Execution error:      no such column: "null"
+```
+
+`pragma_index_info` reports a null column name for an expression, and the planner treats that value
+as an identifier. `NULLIF`, `CASE`, and mixed column/expression indexes show the same problem.
+
+The failure occurs when the migrator needs to generate an index-creation step. An unchanged index
+that requires no such step does not exercise this path, which is why the expression index in
+[FEAT-003](features/003-mfa-totp/)'s schema is unaffected.
+
+Tests: [expression index migration](pins/migration-plan.test.ts).
+
+### 10. Array element types are not applied
+
+Supplying `ddlDialect: 'postgres'`, or running `0.9.1-next.2` or later where it is defaulted, returns
+arrays as arrays. Their elements are still returned as stored:
+
+```jsonc
+// written: { "flags": [true, false], "nums": [1, 2], "names": ["a"] }
+[{ "flags": [1, 0], "nums": [1, 2], "names": ["a"] }]
+```
+
+The merged metadata records the element type as the scalar it is — `pg_type: "bool"` for a column
+declared `boolean[]` — and nothing maps the elements through it. `int[]` and `text[]` are unaffected,
+because their JSON representation already matches the stored values.
+
+This is separate from [FIX-003](fixes/003-value-types/), which restores the declared types. It was
+reproduced on `0.10.0` as well.
+
+### 11. Migration plans have no step type for removing a trigger
+
+`PlanStepType` declares `create_trigger`, and both halves for every other object: `add_column` and
+`drop_column`, `add_index` and `drop_index`, `create_table` and `drop_table`. There is no
+`drop_trigger`.
+
+The published package never plans trigger work, so it does not need one: a trigger is removed only
+along with its table. [FIX-005](fixes/005-triggers-in-migration/) has to remove triggers before a
+table is rebuilt, and emits a step type the enumeration does not list.
+
+The executor runs the SQL without consulting the type, so this affects consumers that render, filter,
+or audit a plan by step type.
+
+### 12. CSV rows with extra fields are truncated
+
+```text
+POST /rest/v1/authors
+Content-Type: text/csv
 
 id,name
-1,A,surplus            → inserted as {id: 1, name: "A"}, 201
+1,A,surplus
 ```
 
-Real PostgREST rejects a ragged row. Note the contrast with the JSON path, which is strict about
-exactly this: a batch whose objects have differing keys is refused with `PGRST102`.
+The response is `201`, and the inserted row is `{ "id": 1, "name": "A" }`. The extra field is
+silently discarded. PostgREST rejects rows whose field count does not match the header.
 
-**Impact:** a misaligned or wrongly-delimited import lands as partial data with a 201.
+This can make an incorrectly delimited import appear successful while losing data. The JSON batch
+path already rejects objects with differing keys using `PGRST102`.
 
-### 11. A `/regex/` pattern is compiled with its delimiters
+Test: [CSV requests](pins/postgrest-csv.test.ts).
+
+### 13. String regex patterns retain their slash delimiters
 
 ```js
 patternMatch('foobar', /^foo/) // true
 patternMatch('foobar', '/^foo/') // false
+patternMatch('foobar', '^foo', 'regex') // true
 ```
 
-The code switches into regex mode *because* the pattern starts with `/`, then hands the whole string,
-slashes included, to `new RegExp` — so `/^foo/` searches for a literal forward slash. What makes it
-worse than it looks: the default mode is not regex (`patternMatch('foobar', '^foo')` is `false`), and
-the only implicit route into regex mode is the spelling that is broken. Explicit
-`patternMatch(input, '^foo', 'regex')` works.
+A leading `/` selects regex mode, but the whole string, including the delimiters, is passed to
+`new RegExp`. Pass a `RegExp` object or select regex mode explicitly to avoid this behavior.
 
-### 12. `trim()` in translated DDL is refused by the name the parser gives it
+Test: [pattern matching](pins/utils.test.ts).
 
+### 14. `trim()` is rejected as `btrim` during DDL translation
+
+```sql
+CREATE INDEX i ON t ((trim(note)));
 ```
-CREATE INDEX i ON t ((trim(note)))   →   Function call "btrim" not supported
-```
 
-The Postgres parser normalises `trim` to `btrim`, and the translator's allow-list does not carry that
-name — so a function that exists in SQLite is refused under a name the author never wrote. Upstream
-uses `trim(...) <> ''` in its own MFA schema, which is exactly the shape this blocks.
+The PostgreSQL parser normalizes `trim` to `btrim`. The translator does not recognize that name and
+returns `Function call "btrim" not supported`, even though SQLite supports the intended operation.
 
-### 13. `PGRST200` names a schema called `test`, which does not exist
+Test: [DDL expression translation](pins/ddl-translation.test.ts).
 
-```
+### 15. Relationship errors report a hardcoded schema name
+
+```text
 GET /rest/v1/books?select=title,nope(x)
 
-"Searched for a foreign key relationship between 'books' and 'nope'
- in the schema 'test', but no matches were found."
+Searched for a foreign key relationship between 'books' and 'nope'
+ in the schema 'test', but no matches were found.
 ```
 
-The exposed schemas are `graphql_public`, `public` and `storage`, and tables resolve under `public`.
-The value is not derived from the request — the same string appears whatever `Host` is used, so it is
-a hardcoded literal. Cosmetic on its own, but it points the reader at a schema that is not there while
-they are already debugging a relationship they cannot find.
+The request uses `public`, but the `PGRST200` message names `test`. The schema name in the error is
+hardcoded, making relationship failures harder to diagnose.
 
----
+Test: [relationship error details](pins/postgrest-select-syntax.test.ts).
 
-## Minor — divergences worth knowing, and one dead helper
+## API limitations and helper behavior
 
-### 14. The OpenAPI document describes nothing
+### 16. The OpenAPI response contains no routes or models
 
-`GET /rest/v1/` returns a syntactically valid Swagger 2.0 document with exactly six keys — `swagger`,
-`info`, `basePath`, `schemes`, `consumes`, `produces`. There is no `paths` and no `definitions`
-member; they are absent rather than empty. Real PostgREST emits a path per table and a definition per
-row shape. Client generators consume this and produce an empty API without erroring, because the
-document is well formed.
+`GET /rest/v1/` returns JSON with Swagger 2.0 metadata: `swagger`, `info`, `basePath`, `schemes`,
+`consumes`, and `produces`. It omits `paths` and `definitions`, so it provides no table endpoints or
+row models for documentation and client generation.
 
-### 15. `count=planned` and `count=estimated` perform an exact count
+Test: [OpenAPI response](pins/system.test.ts).
 
-All three counting modes do the same exact count — SQLite has no planner estimate to read. The
-answers are more accurate than PostgREST's and the performance characteristic callers chose them for
-is gone.
+### 17. All count modes perform an exact count
 
-### 16. `PUT` on a storage object does not parse multipart
+`count=exact`, `count=planned`, and `count=estimated` all perform an exact count. Callers receive the
+exact total, but choosing an estimated mode does not reduce the counting cost.
 
-`POST /storage/v1/object/:bucket/*` parses a multipart form and stores the file part. `PUT` on the
-same path reads the body straight through, so sending it a `FormData` stores the MIME boundary
-markers and headers as the file's content. Raw bytes on `PUT` work correctly. Whether this is a defect
-depends on what clients send to that route; it is recorded because the asymmetry is invisible from the
-route table.
+Test: [count preferences](pins/postgrest-negotiation.test.ts).
 
-### 17. An email change is confirmed only at the current address
+### 18. Storage `PUT` writes multipart data without parsing it
 
-`PUT /auth/v1/user {email}` stages the address as `new_email` and mails a confirmation to the address
-already on file. Nothing is sent to the new address; real GoTrue with `secure_email_change_enabled`
-mails both. Defensible — a stolen session cannot silently move an account to an attacker's inbox — but
-an address is never proven to belong to the person claiming it.
+`POST /storage/v1/object/:bucket/*` parses multipart data and stores the file part. `PUT` on the same
+path stores the request body directly. Sending `FormData` to `PUT` therefore stores the multipart
+boundaries and headers along with the file contents.
 
-### 18. `deleted_at` is written by nobody and read by nobody
+Raw-byte bodies work correctly with `PUT`.
 
-The column exists on `auth.users`, and the string `deleted_at` occurs exactly **once** in the whole
-published bundle: in the DDL that creates it. Nothing sets it and nothing checks it, so there is no
-soft delete in this build — only a column shaped like one.
+Test: [storage object replacement](pins/storage.test.ts).
 
-### 19. `objectDiff` cannot see added keys
+### 19. An email change sends confirmation only to the current address
+
+For an account with an existing email address, `PUT /auth/v1/user {email}` stages the change and sends
+the confirmation to the current address. Nothing is sent to the new address under the default
+configuration tested here.
+
+GoTrue's secure email-change flow sends confirmation to both addresses. The observed flow does not
+verify that the user can receive mail at the new address.
+
+Test: [email changes](pins/auth-users.test.ts).
+
+### 20. The published package does not implement soft deletion
+
+`auth.users` has a `deleted_at` column, but the published bundle does not set or check it. Signup,
+sign-in, and user updates leave it unchanged.
+
+[FEAT-002](features/002-admin-user-api/) adds a soft-delete path; this finding describes the original
+package.
+
+Test: [user lifecycle](pins/auth-users.test.ts).
+
+### 21. `objectDiff` omits added keys
 
 ```js
 objectDiff({ a: 1, b: 2 }, { a: 1, b: 3, c: 4 }) // { b: 3 }
 ```
 
-It iterates the keys of the *first* argument. Fine for "what changed in a known shape", wrong for
-"diff these two objects".
+The helper iterates only the first object's keys, so it does not report `c`. It can compare values
+within an existing shape, but does not describe every difference between two objects.
 
-### 20. `mergeObject` merges arrays element-wise
+Test: [object helpers](pins/utils.test.ts).
+
+### 22. `mergeObject` merges arrays by index
 
 ```js
 mergeObject({ a: [1, 2] }, { a: [3] }) // { a: [3, 2] }
 ```
 
-The shorter array does not truncate the longer one, so config merging with this function cannot
-shorten a list.
+A shorter incoming array leaves the remaining elements of the original array in place. Using this
+helper for configuration overrides therefore cannot shorten a list by supplying a shorter array.
 
-### 21. `setExperimental` accepts any flag; the listing reports only known ones
+Test: [object helpers](pins/utils.test.ts).
 
-`setExperimental('anything', true)` writes to the map unconditionally and `isExperimentalEnabled`
-then returns `true`, but the flag never appears in `listEnabledExperimentals`, which filters a fixed
-roster. A typo in a flag name is enabled, invisible and inert.
+### 23. Unknown experimental flags can be enabled but are not listed
 
-### 22. `parseBigInt` routes through `Number` and loses precision
+`setExperimental('anything', true)` stores the flag, and `isExperimentalEnabled('anything')` returns
+`true`. However, `listEnabledExperimentals()` reports only a fixed set of known flags.
+
+A misspelled flag can therefore read back as enabled without appearing in the listing or activating
+any feature.
+
+Test: [experimental flags](pins/utils.test.ts).
+
+### 24. `parseBigInt` loses integer precision
 
 ```js
 parseBigInt('9007199254740993') // 9007199254740992
 ```
 
-A function with that name doing the one thing its name promises it will not. Listed last because the
-impact is smaller than it looks: it has no callers inside the library, and a `bigint` column past 2^53
-fails loudly rather than quietly — `RangeError: Value is too large to be represented as a JavaScript
-number`, on insert through REST and on read-back even when SQLite stored the value correctly.
+The helper converts through `Number`, losing precision beyond the safe integer range. No internal
+callers were found in the reviewed bundle.
 
----
+REST handling of oversized `bigint` values has a different failure mode: insert and read-back raise
+`RangeError: Value is too large to be represented as a JavaScript number`.
 
-## Not defects — deliberate, and pinned so they are not "fixed" by mistake
+Test: [numeric helpers](pins/utils.test.ts).
 
-- **`getPath` throws** on an unresolvable path rather than returning `undefined`.
-- **`isEmail('a@b')` is `true`** — a bare domain with no dot is accepted.
-- **`isBooleanLike`** tests the four boolean-ish _values_ (`true`, `false`, `0`, `1`); the string
-  `'true'` is not boolean-like.
-- **`/_system/*` sits outside the API-key guard** — `ping`, `config`, `info` and `introspect` are
-  reachable with no credentials even when keys are configured. `config` redacts `jwt_secret`.
-- **The API-key guard is off entirely** unless `auth.publishable_key` or `auth.secret_key` is set; an
-  unrecognised key is then ignored rather than rejected.
-- **The secret key is `service_role` and bypasses RLS.**
-- **A signed storage URL's JWT** carries `{sub, bucket, intent, iat, exp}` and works with no
-  `Authorization` header.
-- **`magiclink` for an unknown address still returns 200**, so addresses cannot be enumerated.
+## Other observed behavior
 
-## Idioms that were checked and do work
+These cases are recorded for compatibility, without treating them as additional defects:
 
-| idiom                                                    | result                                                                    |
-| -------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `references auth.users(id) on delete cascade`            | translates, and the constraint is enforced                                |
-| `USING (owner = (select auth.uid()))` — Supabase's form  | works as well as the direct spelling                                      |
-| `GRANT`, `COMMENT ON` in a migration                     | dropped silently, the migration proceeds                                  |
-| storage policy `(storage.foldername(name))[1]`           | refused by name at migration (`A_Indirection`) — loudly, and in good time |
+- `getPath()` throws when a path cannot be resolved.
+- `isEmail('a@b')` accepts a domain without a dot.
+- `isBooleanLike()` accepts `true`, `false`, `0`, and `1`; it rejects the string `'true'`.
+- `/_system/*` is outside the API-key guard. Its config response redacts `jwt_secret`.
+- The API-key guard is disabled unless `auth.publishable_key` or `auth.secret_key` is configured;
+  unrecognized keys are ignored in that configuration.
+- A configured secret key uses `service_role` and bypasses RLS.
+- A signed storage URL works without an `Authorization` header; its JWT carries `sub`, `bucket`,
+  `intent`, `iat`, and `exp`.
+- A magic-link request for an unknown address still returns `200`.
+- `0.10.0` adds a local admin mode, enabled by default for loopback listeners, in which keyless
+  same-origin requests run as `service_role`. Recorded from its documentation; not reviewed further.
+
+## Schema compatibility checks
+
+| SQL pattern                                   | Observed result                                |
+| --------------------------------------------- | ---------------------------------------------- |
+| `REFERENCES auth.users(id) ON DELETE CASCADE` | Translates and enforces the constraint         |
+| `USING (owner = (SELECT auth.uid()))`         | Works, as does the direct `auth.uid()` form    |
+| `GRANT`, `COMMENT ON`                         | Produce no SQLite DDL; migration proceeds      |
+| `(storage.foldername(name))[1]` in a policy   | Rejected during migration with `A_Indirection` |

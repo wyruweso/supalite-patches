@@ -33,18 +33,25 @@ describe('_system', () => {
       assert.equal(r.body.auth.enable_manual_linking, false)
    })
 
+   // A table is located by its DDL rather than its reported name: whether the auth table comes back
+   // as `auth.users` or as `users` with `schema: 'auth'` depends on whether the Postgres metadata was
+   // merged in, which is FIX-003's subject and is asserted there.
+   const authUsers = (body: any) => body.tables.find((t: any) => String(t.sql).includes('"auth.users"'))
+
    test('introspect reports the tables with their SQLite DDL', async () => {
       const r = await get(app, '/_system/introspect')
       assert.equal(r.status, 200)
       assert.ok(Array.isArray(r.body.tables))
-      const names = r.body.tables.map((t: any) => t.name)
-      assert.ok(names.includes('auth.users'), `auth.users missing from ${JSON.stringify(names)}`)
-      assert.ok(names.includes('authors'), 'the seeded table is missing')
+      assert.ok(authUsers(r.body), `auth.users missing from ${JSON.stringify(r.body.tables.map((t: any) => t.name))}`)
+      assert.ok(
+         r.body.tables.some((t: any) => t.name === 'authors'),
+         'the seeded table is missing',
+      )
    })
 
    test('the introspected DDL is the translated SQLite form, not the Postgres original', async () => {
       const r = await get(app, '/_system/introspect')
-      const users = r.body.tables.find((t: any) => t.name === 'auth.users')
+      const users = authUsers(r.body)
       assert.match(users.sql, /^CREATE TABLE "auth\.users" \(/)
       assert.match(users.sql, /id TEXT PRIMARY KEY CHECK \(id IS NULL OR id GLOB/)
    })

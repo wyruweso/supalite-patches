@@ -40,10 +40,9 @@ const STEP_SECONDS = 30
 const SKEW_STEPS = 1
 const CHALLENGE_SECONDS = 300
 /**
- * Wrong codes allowed against one challenge before it is destroyed. Per-challenge hygiene, not a
- * brute-force control — nothing stops the caller raising a fresh challenge. It only keeps a single
- * challenge from being ground through for its whole 300 s. Upstream rate-limits the routes
- * themselves, which is the control this does not have.
+ * Wrong codes allowed against one challenge before it is spent. Per-challenge hygiene, not a
+ * brute-force control: nothing stops the caller raising a fresh challenge, and upstream rate-limits
+ * the routes themselves, which is the control this does not have.
  */
 const MAX_ATTEMPTS = 5
 
@@ -96,6 +95,12 @@ function registerMfaRoutes(): void {
    authRoutes.post('/factors', async (c) => {
       const user = await requireNotAnonymous(c)
       if (user instanceof Response) return user
+
+      // A password-only session must not be able to add a factor to an account that already has one:
+      // it could then verify a factor of its own making and reach aal2 without the existing one ever
+      // being used. Upstream requires aal2 here for the same reason.
+      const insufficient = await refuseUnlessAssured(c, user.id, null)
+      if (insufficient) return insufficient
 
       const body = ((await c.req.json().catch(() => ({}))) ?? {}) as {
          factor_type?: string
@@ -174,6 +179,20 @@ function registerMfaRoutes(): void {
       return c.json({ id, type: 'totp', factor_id: factor.id, expires_at: expiresAt }, 200)
    })
 
+   /**
+    * Verifying a factor, which raises the caller's own session.
+    *
+    * The invariants, each held by one thing rather than by the shape of the code:
+    *
+    *   a further factor needs the existing one   refuseUnlessAssured, on auth.sessions.aal
+    *   one challenge, one verification           the challenge id is in the UPDATE's WHERE
+    *   one OTP, one use                          so is the time step it was computed for
+    *   sessions that passed MFA survive          only sessions below aal2 are ended
+    *
+    * The checks that answer with a status — an unknown factor, an expired challenge, a wrong code —
+    * are outside the transaction, so a wrong answer there costs nothing. Everything that changes
+    * state is inside it, and the token is minted after the commit.
+    */
    authRoutes.post('/factors/:factorId/verify', async (c) => {
       const user = await requireNotAnonymous(c)
       if (user instanceof Response) return user
@@ -181,6 +200,13 @@ function registerMfaRoutes(): void {
       const connection = connectionOf(c)
       const factor = await findFactor(connection, c.req.param('factorId'), user.id)
       if (!factor) return notFound(c)
+
+      // Verifying a factor while a DIFFERENT one is already verified is the same escalation as
+      // enrolling: it must come from a session that has already passed the existing factor. The
+      // ordinary step-up login — one verified factor, proving it from an aal1 session — is untouched,
+      // and so is re-verifying this same factor.
+      const insufficient = await refuseUnlessAssured(c, user.id, factor.id)
+      if (insufficient) return insufficient
 
       const body = ((await c.req.json().catch(() => ({}))) ?? {}) as { code?: string; challenge_id?: string }
 
@@ -190,19 +216,10 @@ function registerMfaRoutes(): void {
       if (Number(factor.challenge_expires_at ?? 0) < Math.floor(Date.now() / 1000)) {
          return c.json({ code: 422, error_code: 'mfa_challenge_expired', msg: 'Challenge has expired' }, 422)
       }
-      if (!(await codeMatches(String(factor.secret), String(body.code ?? '')))) {
-         const attempts = Number(factor.challenge_attempts ?? 0) + 1
-         if (attempts >= MAX_ATTEMPTS) {
-            // The challenge, not the factor: a wrong code is usually a typo or a drifted clock,
-            // and locking the factor would need an unlock route this feature does not have.
-            await clearChallenge(connection, factor.id)
-         } else {
-            await connection.exec(
-               'UPDATE "auth.mfa_factors" SET challenge_attempts = ? WHERE id = ?',
-               attempts,
-               factor.id,
-            )
-         }
+
+      const step = await matchedStep(String(factor.secret), String(body.code ?? ''))
+      if (step === null) {
+         await recordFailedAttempt(connection, factor.id, String(factor.challenge_id))
          return c.json({ code: 422, error_code: 'mfa_verification_failed', msg: 'Invalid TOTP code entered' }, 422)
       }
 
@@ -214,22 +231,16 @@ function registerMfaRoutes(): void {
       // this session is minted at it. A fresh session would change `session_id` under the caller and
       // terminate the very token they are making this request with.
       //
-      // One transaction: half-applied is a security state nobody asked for — a factor verified
-      // against an aal1 session, or the other sessions destroyed while this one was never raised.
-      // The token is minted after the commit, where a failure is harmless.
+      // Everything that changes state is in one transaction, and the challenge is consumed by the
+      // first statement in it — matched on its id and on the time step, so two requests carrying the
+      // same challenge or the same code cannot both succeed. The token is minted after the commit,
+      // where a failure is harmless.
+      let consumed = true
       await c.var.authService.repo.transaction(async (tx) => {
          const now = new Date().toISOString()
-         await tx
-            .update('mfa_factors')
-            .set({
-               status: 'verified',
-               challenge_id: null,
-               challenge_expires_at: null,
-               challenge_attempts: 0,
-               updated_at: now,
-            })
-            .where('id', '=', factor.id)
-            .execute()
+
+         consumed = await consumeChallenge(tx, factor.id, String(factor.challenge_id), step, now)
+         if (!consumed) return
 
          await tx.update('sessions').set({ aal: 'aal2', factor_id: factor.id }).where('id', '=', sessionId).execute()
 
@@ -249,15 +260,31 @@ function registerMfaRoutes(): void {
             )
             .execute()
 
-         // The user's other sessions end here: established at aal1, they would let an older token
-         // walk around the second factor.
-         await tx
-            .deleteFrom('refresh_tokens')
+         // The user's weaker sessions end here: established at aal1, they would let an older token
+         // walk around the second factor. A session that has already passed MFA is left alone —
+         // ending it would log the user's other devices out for authenticating properly.
+         const others = (await tx
+            .table('sessions')
+            .select(['id', 'aal'])
             .where('user_id', '=', user.id)
-            .where('session_id', '!=', sessionId)
-            .execute()
-         await tx.deleteFrom('sessions').where('user_id', '=', user.id).where('id', '!=', sessionId).execute()
+            .where('id', '!=', sessionId)
+            .execute()) as { id: string; aal?: string | null }[]
+         const weaker = others.filter((session) => session.aal !== 'aal2').map((session) => session.id)
+
+         if (weaker.length) {
+            await tx.deleteFrom('refresh_tokens').where('session_id', 'in', weaker).execute()
+            await tx.deleteFrom('sessions').where('id', 'in', weaker).execute()
+         }
       })
+
+      // Nothing was consumed: another request had this challenge, or this code was already used for
+      // its time step. Which one is a question for the row, asked once, outside the transaction.
+      if (!consumed) {
+         const current = await findFactor(connection, factor.id, user.id)
+         return current?.challenge_id === factor.challenge_id
+            ? c.json({ code: 422, error_code: 'mfa_verification_failed', msg: 'Invalid TOTP code entered' }, 422)
+            : c.json({ code: 404, error_code: 'mfa_challenge_not_found', msg: 'Challenge not found' }, 404)
+      }
 
       // A fresh pair for that same session, through the library's refresh path, so the wrapper in
       // src/auth/session.ts stamps it from the row just raised to aal2.
@@ -290,18 +317,108 @@ function isUniqueViolation(error: unknown): boolean {
 const notFound = (c: HonoContext) =>
    c.json({ code: 404, error_code: 'mfa_factor_not_found', msg: 'Factor not found' }, 404)
 
+/**
+ * Refuses unless the caller's session has already passed MFA, when the account has a verified factor
+ * other than `exceptFactorId`. Read from `auth.sessions`, not from the token: the level is a fact
+ * about the session, and a token minted before this feature existed carries no claim at all.
+ *
+ * `null` when the request may proceed.
+ */
+async function refuseUnlessAssured(
+   c: HonoContext,
+   userId: string,
+   exceptFactorId: string | null,
+): Promise<Response | null> {
+   const connection = connectionOf(c)
+   const verified = await connection.exec(
+      `SELECT id FROM "auth.mfa_factors" WHERE user_id = ? AND status = 'verified'`,
+      userId,
+   )
+   const others = (verified.rows ?? []).filter((row) => row.id !== exceptFactorId)
+   if (others.length === 0) return null
+
+   const sessionId = (c.get('jwt') as { session_id?: string })?.session_id
+   const session = sessionId
+      ? ((await connection.exec('SELECT aal FROM "auth.sessions" WHERE id = ?', sessionId)).rows ?? [])[0]
+      : undefined
+   if (session?.aal === 'aal2') return null
+
+   return c.json(
+      {
+         code: 403,
+         error_code: 'insufficient_aal',
+         msg: 'AAL2 required to add or verify a further factor while one is already verified',
+      },
+      403,
+   )
+}
+
+/**
+ * Marks the factor verified and spends both the challenge and the time step, in one statement.
+ *
+ * The row is matched on the challenge it still holds and on a step it has not accepted before, so of
+ * two requests carrying the same challenge — or the same code through two challenges — exactly one
+ * updates a row. `false` means somebody else got there first.
+ */
+async function consumeChallenge(
+   tx: any,
+   factorId: string,
+   challengeId: string,
+   step: number,
+   now: string,
+): Promise<boolean> {
+   const result = await tx
+      .update('mfa_factors')
+      .set({
+         status: 'verified',
+         challenge_id: null,
+         challenge_expires_at: null,
+         challenge_attempts: 0,
+         last_verified_step: step,
+         updated_at: now,
+      })
+      .where('id', '=', factorId)
+      .where('challenge_id', '=', challengeId)
+      // Defaulted to 0 rather than nullable, so this one comparison is the whole guard.
+      .where('last_verified_step', '<', step)
+      .execute()
+
+   return updatedRows(result) > 0
+}
+
+/** The driver answers an update with an array of results, one per statement. */
+function updatedRows(result: unknown): number {
+   const first = Array.isArray(result) ? result[0] : result
+   return Number((first as { numUpdatedRows?: unknown })?.numUpdatedRows ?? 0)
+}
+
+/**
+ * Counts a wrong code against the challenge it was offered for, in SQL rather than by reading and
+ * writing back — concurrent attempts would otherwise all store the same 1. The challenge is spent
+ * once the count reaches the limit; the factor is left alone, since a wrong code is usually a typo
+ * or a drifted clock and locking a factor needs an unlock route this feature does not have.
+ */
+async function recordFailedAttempt(connection: Connection, factorId: string, challengeId: string): Promise<void> {
+   await connection.exec(
+      'UPDATE "auth.mfa_factors" SET challenge_attempts = challenge_attempts + 1' +
+         ' WHERE id = ? AND challenge_id = ?',
+      factorId,
+      challengeId,
+   )
+   await connection.exec(
+      'UPDATE "auth.mfa_factors" SET challenge_id = NULL, challenge_expires_at = NULL, challenge_attempts = 0' +
+         ' WHERE id = ? AND challenge_id = ? AND challenge_attempts >= ?',
+      factorId,
+      challengeId,
+      MAX_ATTEMPTS,
+   )
+}
+
 async function findFactor(connection: Connection, id: string, userId: string) {
    const result = await connection.exec('SELECT * FROM "auth.mfa_factors" WHERE id = ? AND user_id = ?', id, userId)
    return (result.rows ?? [])[0] ?? null
 }
 
-/** Ends a challenge that burned through its attempts. Verification clears it inside its transaction. */
-async function clearChallenge(connection: Connection, factorId: string): Promise<void> {
-   await connection.exec(
-      'UPDATE "auth.mfa_factors" SET challenge_id = NULL, challenge_expires_at = NULL, challenge_attempts = 0 WHERE id = ?',
-      factorId,
-   )
-}
 
 // --- TOTP ----------------------------------------------------------------------------------------
 //
@@ -357,13 +474,17 @@ async function codeForStep(secret: string, step: number): Promise<string> {
  * Neighbouring steps are accepted too: clocks drift between a code being read off a phone and
  * reaching the server, and without the allowance a user near a boundary could never sign in.
  */
-async function codeMatches(secret: string, code: string): Promise<boolean> {
+/**
+ * The time step this code is the OTP for, or null. The step rather than a boolean, because an OTP has
+ * to be usable once and the step is what identifies it.
+ */
+async function matchedStep(secret: string, code: string): Promise<number | null> {
    const cleaned = code.replace(/\s+/g, '')
-   if (!/^\d{6}$/.test(cleaned)) return false
+   if (!/^\d{6}$/.test(cleaned)) return null
 
    const current = Math.floor(Date.now() / 1000 / STEP_SECONDS)
    for (let offset = -SKEW_STEPS; offset <= SKEW_STEPS; offset++) {
-      if ((await codeForStep(secret, current + offset)) === cleaned) return true
+      if ((await codeForStep(secret, current + offset)) === cleaned) return current + offset
    }
-   return false
+   return null
 }

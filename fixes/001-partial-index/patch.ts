@@ -1,16 +1,12 @@
 // FIX-001 — a partial index loses its predicate.  FINDINGS #1
 //
-// `CREATE UNIQUE INDEX u ON users (email) WHERE deleted_at IS NULL` becomes a global unique index, so
-// the database rejects rows Postgres accepts — the soft-delete idiom breaks, silently, at the user.
-//
-// The predicate has to survive four representations, and it was lost in three:
+// The predicate has to survive four representations, and skipping any one brings the defect back
+// whole:
 //
 //   Postgres AST → SQLite DDL    IndexStmt          emits WHERE
 //   SQLite DDL   → schema model  introspect         reads WHERE back
 //   model        → comparison    makeIndexKey       notices a changed WHERE
 //   model        → SQLite DDL    MigrationPlanner   emits WHERE again
-//
-// Skipping any one brings the defect back whole, as the first attempt at translation alone proved.
 import { methodNamed, replaceFunction, wrapMethod } from '../../lib/patcher.ts'
 
 export const id = 'FIX-001'
@@ -26,14 +22,20 @@ export const expectedDivergence = [
    'FIX-001 partial indexes keep their predicate > a migration that only changes the predicate is noticed',
    'FIX-001 partial indexes keep their predicate > a WHERE inside the statement is not mistaken for the filter',
    'FIX-001 partial indexes keep their predicate > an index whose name contains a quote keeps its predicate',
-   // `the same predicate written differently is not a change` is not declared: with no predicate in
-   // the model, the published build agrees nothing changed, for the wrong reason. It guards against
-   // the comparison becoming too literal.
+   'FIX-001 partial indexes keep their predicate > the predicate survives a table rebuild',
+   'FIX-001 partial indexes keep their predicate > WHERE inside an index name is not mistaken for the filter',
+   'FIX-001 partial indexes keep their predicate > a predicate differing in more than spacing is a change',
+   'FIX-001 partial indexes keep their predicate > a plain index becomes partial, and back',
+   // `the same address twice among live rows is still refused` is not declared either: a globally
+   // unique index refuses that insert too, so both builds agree. It is the other half of the idiom —
+   // the half that must keep working while the reusable half is fixed.
+   //
+   // `the same predicate spaced differently is not a change` is not declared: with no predicate in
+   // the model the published build agrees nothing changed, for the wrong reason. It guards the
+   // comparison against becoming too literal.
 ]
 
 export function apply(source: string): string {
-   // A wrapper: the original's statement is kept whole and one suffix added. Rebuilding it would
-   // need the quoting helper's minified name, and would freeze a copy of the rest of the method.
    let patched = wrapMethod(source, {
       at: methodNamed('IndexStmt', 'IndexElem'),
       replacement: new URL('./src/db/translation/SqliteDeparser.ts', import.meta.url),

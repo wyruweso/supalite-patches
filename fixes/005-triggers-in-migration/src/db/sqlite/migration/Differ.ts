@@ -14,7 +14,6 @@ interface Schema {
 
 interface SchemaDiff {
    has_changes: boolean
-   /** Added by this patch: triggers were not part of the diff at all. */
    triggers?: TriggerChange[]
 }
 
@@ -26,7 +25,7 @@ interface PlanStep {
 
 interface Plan {
    steps: PlanStep[]
-   warnings: string[]
+   warnings: unknown[]
    unsafe: boolean
 }
 
@@ -38,123 +37,125 @@ interface Planner {
    planOriginal(diff: SchemaDiff, current: Schema, desired: Schema, options?: unknown): Plan
 }
 
+/** `create_trigger` is the library's own PlanStepType. It declares no value for removing one. */
+const CREATE_TRIGGER = 'create_trigger'
+const DROP_TRIGGER = 'drop_trigger'
+
+/** The steps a rebuild is made of; the presence of either means tables are being replaced. */
+const REBUILD_STEPS = ['drop_table', 'rename_table']
+
 /**
- * Compares the actual schema with the desired one.
- *
- * The diff covered tables, columns, indexes and foreign keys, but not triggers, so a new trigger
- * never became a plan step — it translated and executed fine, it simply was never created. The
- * planner recreated triggers only as a side effect of rebuilding the table they hang off.
- *
- * The silence is the damage: the migration reports success, the tables are there, the trigger is
- * not. That breaks the canonical Supabase recipes, `handle_new_user()` and `updated_at`.
+ * The diff had no `triggers` key at all, so a trigger was never a change to plan for.
  */
 export function diff(this: Differ, current: Schema, desired: Schema): SchemaDiff {
    const result = this.diffOriginal(current, desired)
 
-   const before = new Map((current.triggers ?? []).map((t) => [t.name, t]))
-   const after = new Map((desired.triggers ?? []).map((t) => [t.name, t]))
+   const currentTriggersByName = new Map((current.triggers ?? []).map((t) => [t.name, t]))
+   const desiredTriggersByName = new Map((desired.triggers ?? []).map((t) => [t.name, t]))
 
-   const triggers: TriggerChange[] = []
-   // By text, not just by name: a redefined trigger must be recreated, and after introspection the
-   // text is all that is known about it.
-   for (const [name, trigger] of after) {
-      const existing = before.get(name)
-      if (!existing) triggers.push({ ...trigger, type: 'added' })
+   const triggerChanges: TriggerChange[] = []
+   for (const [name, trigger] of desiredTriggersByName) {
+      const existing = currentTriggersByName.get(name)
+      if (!existing) triggerChanges.push({ ...trigger, type: 'added' })
+      // SQLite has no CREATE OR REPLACE TRIGGER, so a redefinition is a removal and an addition.
       else if (statementOf(existing.sql) !== statementOf(trigger.sql)) {
-         triggers.push({ ...existing, type: 'removed' }, { ...trigger, type: 'added' })
+         triggerChanges.push({ ...existing, type: 'removed' }, { ...trigger, type: 'added' })
       }
    }
-   for (const [name, trigger] of before) if (!after.has(name)) triggers.push({ ...trigger, type: 'removed' })
+   for (const [name, trigger] of currentTriggersByName) {
+      if (!desiredTriggersByName.has(name)) triggerChanges.push({ ...trigger, type: 'removed' })
+   }
 
-   if (triggers.length === 0) return result
-   // Without this the plan comes back empty: it exits early when nothing changed, and triggers did
-   // not count as a change.
-   return { ...result, triggers, has_changes: true }
+   if (triggerChanges.length === 0) return result
+   return { ...result, triggers: triggerChanges, has_changes: true }
 }
 
 /**
- * Builds the migration plan. Two things decide where the trigger steps go, and appending them gets
- * both wrong.
+ * Trigger steps, placed around the rest of the plan rather than appended to it.
  *
- * **Who owns a trigger during a table rebuild.** SQLite drops a table's triggers with the table, so
- * the original recreates the trigger it read — the one as it is now. A migration that changes a
- * column and redefines a trigger together therefore ended with no trigger at all: the original
- * recreated the old one, this patch dropped it, and the replacement was skipped as already planned.
- * The name alone cannot decide it; what the original plans is compared with what is wanted.
+ * SQLite drops a table's own triggers with the table, but a trigger on another table that mentions
+ * it survives — and the next `ALTER TABLE` validates the whole schema, finds the dangling reference
+ * and fails the migration:
  *
- * **Where they run.** The original's plan ends `COMMIT;` then `PRAGMA foreign_keys=ON;`, so appended
- * steps run outside the transaction and a failed trigger leaves the schema half-applied. Before the
- * commit is still after every table step, which is what `CREATE TRIGGER` needs.
+ *    error in trigger on_src_insert: no such table: main.dst
+ *
+ * So whenever tables are rebuilt, every trigger is dropped before the rebuild and every desired one
+ * recreated after it, and the original's own recreation steps are dropped to avoid doing it twice.
+ * More work than the minimum, and the minimum is a dependency graph over trigger bodies.
  */
 export function plan(this: Planner, diff: SchemaDiff, current: Schema, desired: Schema, options?: unknown): Plan {
-   const result = this.planOriginal(diff, current, desired, options)
+   const originalPlan = this.planOriginal(diff, current, desired, options)
+   const rebuilding = originalPlan.steps.some((step) => REBUILD_STEPS.includes(step.type))
    const changes = diff.triggers ?? []
-   if (changes.length === 0) return result
+   if (!rebuilding && changes.length === 0) return originalPlan
 
-   // What the original already plans to create, by name, with the text it plans to use.
-   const planned = new Map<string, string>()
-   for (const step of result.steps) {
-      if (step.type === 'add_trigger' || /^\s*CREATE\s+TRIGGER/i.test(step.sql)) {
-         planned.set(triggerNameOf(step.sql), statementOf(step.sql))
+   // A rebuild invalidates every trigger, whichever table it sits on, so the whole set is replaced.
+   // Otherwise only what the diff reported has to move.
+   const dropped = rebuilding ? (current.triggers ?? []) : changes.filter((c) => c.type === 'removed')
+   const created = rebuilding ? (desired.triggers ?? []) : changes.filter((c) => c.type === 'added')
+
+   const steps = originalPlan.steps.filter((step) => !isTriggerCreation(step))
+   if (!rebuilding) {
+      // Without a rebuild the original may already have planned exactly what the diff asked for.
+      const plannedTriggerSqlByName = new Map<string, string>()
+      for (const step of originalPlan.steps) {
+         if (isTriggerCreation(step)) plannedTriggerSqlByName.set(triggerNameOf(step.sql), statementOf(step.sql))
+      }
+      const satisfiedTriggerNames = new Set(
+         created.filter((t) => plannedTriggerSqlByName.get(t.name) === statementOf(t.sql)).map((t) => t.name),
+      )
+      if (satisfiedTriggerNames.size > 0) {
+         return withTriggerSteps(
+            originalPlan,
+            originalPlan.steps,
+            dropped.filter((t) => !satisfiedTriggerNames.has(t.name)),
+            created.filter((t) => !satisfiedTriggerNames.has(t.name)),
+         )
       }
    }
 
-   // Names the original already brings to the wanted state. Both halves go: the create because
-   // `CREATE TRIGGER` has no `IF NOT EXISTS`, the drop because it would remove what was just made.
-   //
-   // A name the original plans with different text is not settled — both steps stay, run after it in
-   // the same transaction, and the desired definition has the last word.
-   const settled = new Set<string>()
-   for (const change of changes) {
-      if (change.type !== 'added') continue
-      if (planned.get(change.name) === statementOf(change.sql)) settled.add(change.name)
-   }
+   return withTriggerSteps(originalPlan, steps, dropped, created)
+}
 
-   const steps: PlanStep[] = []
-   for (const change of changes.filter((c) => c.type === 'removed')) {
-      if (settled.has(change.name)) continue
-      steps.push({
-         sql: `DROP TRIGGER IF EXISTS ${quoteIdentifier(change.name)};`,
-         description: `Drop trigger ${quoteIdentifier(change.name)}`,
-         type: 'drop_trigger',
-      })
-   }
-   for (const change of changes.filter((c) => c.type === 'added')) {
-      if (settled.has(change.name) || !change.sql) continue
-      steps.push({
-         sql: `${statementOf(change.sql)};`,
-         description: `Create trigger ${quoteIdentifier(change.name)} on ${quoteIdentifier(change.table)}`,
-         type: 'add_trigger',
-      })
-   }
+function withTriggerSteps(originalPlan: Plan, steps: PlanStep[], dropped: Trigger[], created: Trigger[]): Plan {
+   if (dropped.length === 0 && created.length === 0) return { ...originalPlan, steps }
 
-   return steps.length === 0 ? result : { ...result, steps: beforeCommit(result.steps, steps) }
+   const drops: PlanStep[] = dropped.map((trigger) => ({
+      sql: `DROP TRIGGER IF EXISTS ${quoteIdentifier(trigger.name)};`,
+      description: `Drop trigger ${quoteIdentifier(trigger.name)}`,
+      type: DROP_TRIGGER,
+   }))
+   const creations: PlanStep[] = created
+      .filter((trigger) => trigger.sql)
+      .map((trigger) => ({
+         sql: `${statementOf(trigger.sql)};`,
+         description: `Create trigger ${quoteIdentifier(trigger.name)} on ${quoteIdentifier(trigger.table)}`,
+         type: CREATE_TRIGGER,
+      }))
+
+   // Inside the transaction the plan opens, and around the work it does: the drops before anything is
+   // replaced, the creations once every table exists again.
+   const opening = steps.findIndex((step) => step.type === 'begin_transaction')
+   const closing = steps.findIndex((step) => step.type === 'commit_transaction')
+   const head = opening < 0 ? 0 : opening + 1
+   const tail = closing < 0 ? steps.length : closing
+
+   return {
+      ...originalPlan,
+      steps: [...steps.slice(0, head), ...drops, ...steps.slice(head, tail), ...creations, ...steps.slice(tail)],
+   }
+}
+
+function isTriggerCreation(step: PlanStep): boolean {
+   return step.type === CREATE_TRIGGER || /^\s*CREATE\s+TRIGGER/i.test(step.sql)
 }
 
 /**
- * Puts the new steps inside the transaction the original opened, just before its commit. With no
- * commit step — a plan the original decided needed no transaction — the end is the only place.
- */
-function beforeCommit(original: PlanStep[], added: PlanStep[]): PlanStep[] {
-   const commit = original.findIndex((s) => s.type === 'commit_transaction')
-   if (commit === -1) return [...original, ...added]
-   return [...original.slice(0, commit), ...added, ...original.slice(commit)]
-}
-
-/**
- * The trigger name out of `CREATE TRIGGER …`, read rather than matched. A regex like `"?([^\s"]+)"?`
- * mishandles a name containing a space (the class stops there) or a quote (SQLite doubles it, so the
- * first half looks like the end) — and a misread name means a trigger recreated every migration or
- * never.
- *
- * Neither can reach here in this build, since the translator mangles such names before the database
- * refuses them; handling them costs nothing and will matter once that is fixed.
+ * The trigger name out of `CREATE TRIGGER [IF NOT EXISTS] name …`, read rather than matched: an
+ * unquoted name ends at whitespace, and a quoted one may contain a doubled quote.
  */
 function triggerNameOf(sql: string): string {
-   const after = /^\s*CREATE\s+TRIGGER\s+/i.exec(sql)
-   if (!after) return ''
-
-   const rest = sql.slice(after[0].length)
+   const rest = sql.replace(/^\s*CREATE\s+TRIGGER\s+(IF\s+NOT\s+EXISTS\s+)?/i, '')
    if (rest[0] !== '"') return rest.split(/[\s(]/)[0] ?? ''
 
    let name = ''
@@ -177,12 +178,9 @@ function triggerNameOf(sql: string): string {
 /**
  * A statement, less the terminator that is not part of it. The comparison is exact, deliberately:
  * collapsing whitespace would equate `VALUES ('a  b')` with `VALUES ('a b')`, so a trigger differing
- * only inside a string literal would never be recreated.
- *
- * Exact works because both sides come from the same generator — SQLite stores `CREATE TRIGGER`
- * verbatim, and what ran is what the translator emitted, so a schema migrated twice compares byte
- * for byte (asserted in the tests). The failure modes are also asymmetric: too strict recreates a
- * trigger needlessly, too loose leaves the old one in place for ever.
+ * only inside a string literal would never be recreated. Exact works because both sides come from
+ * the same generator, and the failure modes are asymmetric — too strict recreates a trigger
+ * needlessly, too loose leaves the old one in place for ever.
  */
 function statementOf(sql: string): string {
    return (sql ?? '').trim().replace(/;+$/, '').trim()

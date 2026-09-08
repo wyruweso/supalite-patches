@@ -295,11 +295,14 @@ describe('FEAT-003 TOTP second factor', () => {
       const u = await newUser()
       const factor = await enroll(u)
 
+      // A step apart, because one OTP is good once: the same code through a second challenge is
+      // refused, which is its own test below.
+      const step = Math.floor(Date.now() / 1000 / 30)
       let claims
-      for (let round = 0; round < 2; round++) {
+      for (const round of [0, 1]) {
          const raised = await challenge(u, factor.id)
-         const r = await verify(u, factor.id, { challenge_id: raised.id, code: totp(factor.totp.secret) })
-         assert.equal(r.status, 200)
+         const r = await verify(u, factor.id, { challenge_id: raised.id, code: totp(factor.totp.secret, step + round) })
+         assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 120))
          claims = claimsOf(r.body.access_token)
       }
 
@@ -420,7 +423,9 @@ describe('FEAT-003 TOTP second factor', () => {
          ['totp', 'password'],
       )
       // FEAT-001's claim on a session FEAT-003 elevated: neither wrapper erased the other's work.
-      assert.equal(claims.is_anonymous, false)
+      // Only asserted when that patch is installed too — this test describes the pair, and each of
+      // them has to pass its own suite alone.
+      if ('is_anonymous' in claims) assert.equal(claims.is_anonymous, false)
    })
 
    test('the secret is stored, and this build stores it in the clear', async () => {
@@ -430,5 +435,155 @@ describe('FEAT-003 TOTP second factor', () => {
          []) as { secret: string }[]
       // Recorded rather than hidden: GoTrue can encrypt MFA secrets at rest and this does not.
       assert.equal(row.secret, factor.totp.secret)
+   })
+
+   /**
+    * The escalation these routes exist to prevent. Without an assurance check, a session holding only
+    * the password can add a factor of its own, verify it, and reach aal2 — the account's real factor
+    * never used, and every RLS policy keyed on `aal = 'aal2'` satisfied.
+    */
+   describe('a further factor needs the existing one', () => {
+      const passwordOnlySession = async (u: Enrolled) => {
+         const again = (
+            await post(u.app, '/auth/v1/token?grant_type=password', { email: 'mfa@b.co', password: 'password123' })
+         ).body
+         return { ...u, auth: { Authorization: `Bearer ${again.access_token}` } }
+      }
+
+      const verified = async (u: Enrolled) => {
+         const factor = await enroll(u, { friendly_name: 'Owner' })
+         const raised = await challenge(u, factor.id)
+         const r = await verify(u, factor.id, { challenge_id: raised.id, code: totp(factor.totp.secret) })
+         assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 120))
+         return { factor, session: r.body }
+      }
+
+      test('an aal1 session cannot enrol another factor', async () => {
+         const owner = await newUser()
+         await verified(owner)
+
+         const attacker = await passwordOnlySession(owner)
+         const r = await post(
+            attacker.app,
+            '/auth/v1/factors',
+            { factor_type: 'totp', friendly_name: 'Mine' },
+            attacker.auth,
+         )
+         assert.equal(r.status, 403, JSON.stringify(r.body).slice(0, 120))
+         assert.equal(r.body.error_code, 'insufficient_aal')
+      })
+
+      // The other way in: a factor enrolled before the account had one, verified afterwards from a
+      // session that only ever knew the password.
+      test('an aal1 session cannot verify a factor enrolled earlier', async () => {
+         const owner = await newUser()
+         const spare = await enroll(owner, { friendly_name: 'Spare' })
+         await verified(owner)
+
+         const attacker = await passwordOnlySession(owner)
+         const raised = await post(attacker.app, `/auth/v1/factors/${spare.id}/challenge`, {}, attacker.auth)
+         const r = await post(
+            attacker.app,
+            `/auth/v1/factors/${spare.id}/verify`,
+            { challenge_id: raised.body.id, code: totp(spare.totp.secret) },
+            attacker.auth,
+         )
+         assert.equal(r.status, 403, JSON.stringify(r.body).slice(0, 120))
+         assert.equal(r.body.error_code, 'insufficient_aal')
+      })
+
+      // And the ordinary step-up login is untouched: one verified factor, proved from a fresh session.
+      test('the owner still steps up from a password-only session', async () => {
+         const owner = await newUser()
+         const { factor } = await verified(owner)
+
+         const fresh = await passwordOnlySession(owner)
+         const raised = await challenge(fresh, factor.id)
+         const step = Math.floor(Date.now() / 1000 / 30)
+         const r = await verify(fresh, factor.id, { challenge_id: raised.id, code: totp(factor.totp.secret, step + 1) })
+         assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 120))
+         assert.equal(claimsOf(r.body.access_token).aal, 'aal2')
+      })
+   })
+
+   /**
+    * A challenge and an OTP are each good once, and the guarantee has to hold when two requests arrive
+    * together — the reason both are spent by the statement that verifies rather than by a read
+    * followed by a write.
+    */
+   describe('one use each', () => {
+      test('two concurrent verifications with one challenge: exactly one succeeds', async () => {
+         const u = await newUser()
+         const factor = await enroll(u)
+         const raised = await challenge(u, factor.id)
+         const code = totp(factor.totp.secret)
+
+         const answers = await Promise.all([
+            verify(u, factor.id, { challenge_id: raised.id, code }),
+            verify(u, factor.id, { challenge_id: raised.id, code }),
+         ])
+         assert.equal(
+            answers.filter((r) => r.status === 200).length,
+            1,
+            `statuses: ${answers.map((r) => r.status).join(', ')}`,
+         )
+      })
+
+      test('the same code is refused through a second challenge', async () => {
+         const u = await newUser()
+         const factor = await enroll(u)
+         const code = totp(factor.totp.secret)
+
+         const first = await challenge(u, factor.id)
+         assert.equal((await verify(u, factor.id, { challenge_id: first.id, code })).status, 200)
+
+         const second = await challenge(u, factor.id)
+         const replayed = await verify(u, factor.id, { challenge_id: second.id, code })
+         assert.notEqual(replayed.status, 200, 'one OTP was accepted twice')
+      })
+
+      test('concurrent wrong codes are all counted', async () => {
+         const u = await newUser()
+         const factor = await enroll(u)
+         const raised = await challenge(u, factor.id)
+         const wrong = wrongCode(factor.totp.secret)
+
+         const answers = await Promise.all(
+            Array.from({ length: 5 }, () => verify(u, factor.id, { challenge_id: raised.id, code: wrong })),
+         )
+         assert.deepEqual(new Set(answers.map((r) => r.status)), new Set([422]))
+
+         // Five wrong codes reach the limit, so the challenge is spent rather than still live.
+         const [row] = (await u.connection.exec('SELECT challenge_id FROM "auth.mfa_factors"')).rows ?? []
+         assert.equal(row.challenge_id, null, 'the challenge survived five wrong codes')
+      })
+   })
+
+   /**
+    * Ending the other sessions is about tokens that never passed the factor. A device that has passed
+    * it keeps its session: logging it out is a punishment for authenticating properly.
+    */
+   test('a session that already passed MFA is left alone', async () => {
+      const first = await newUser()
+      const factor = await enroll(first)
+      const raised = await challenge(first, factor.id)
+      const step = Math.floor(Date.now() / 1000 / 30)
+      const strong = (await verify(first, factor.id, { challenge_id: raised.id, code: totp(factor.totp.secret, step) }))
+         .body
+
+      // A second device: password, then the same factor.
+      const second = (
+         await post(first.app, '/auth/v1/token?grant_type=password', { email: 'mfa@b.co', password: 'password123' })
+      ).body
+      const other = { ...first, auth: { Authorization: `Bearer ${second.access_token}` } }
+      const raisedAgain = await challenge(other, factor.id)
+      const r = await verify(other, factor.id, { challenge_id: raisedAgain.id, code: totp(factor.totp.secret, step + 1) })
+      assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 120))
+
+      // The first device, which had already passed MFA, can still refresh.
+      const refreshed = await post(first.app, '/auth/v1/token?grant_type=refresh_token', {
+         refresh_token: strong.refresh_token,
+      })
+      assert.equal(refreshed.status, 200, 'a session that had passed MFA was ended')
    })
 })

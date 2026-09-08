@@ -30,10 +30,8 @@ declare function invalidCredentials(): Error
  * Issuing a session, with a soft-deleted user refused.
  *
  * `deleted_at` occurs exactly once in the published bundle — in the DDL creating the column — so
- * nothing reads it. A soft delete that only takes the password away is no soft delete: the address
- * survives by design, so `/auth/v1/otp` still sends a code to it and `/auth/v1/verify` hands back a
- * session, and the same for `/recover` and `/magiclink`. Removing the address would close those
- * paths but stop the row describing anybody, which is the point of a soft delete.
+ * nothing reads it. The delete replaces the identifiers with a digest, which already stops the
+ * address reaching this row, but the row is still reachable by id and by whatever path is added next.
  *
  * So the check goes where the paths meet. Every flow creating an initial authenticated session —
  * password, signup, `verifyOtp`, magic link, recovery, OAuth, PKCE exchange — converges here: one

@@ -64,6 +64,55 @@ describe('FIX-001 partial indexes keep their predicate', () => {
       assert.equal(reused.status, 201, `re-registering a soft-deleted address: ${pgrstCode(reused)}`)
    })
 
+   // The other half: within its own subset the index is still UNIQUE. A predicate that survived but
+   // matched nothing would pass the test above and fail this one.
+   test('the same address twice among live rows is still refused', async () => {
+      const { app, connection } = await migrate(USERS)
+
+      assert.equal((await post(app, '/rest/v1/users', { id: 1, email: 'a@b.co' })).status, 201)
+
+      // Refused, and the row is not there. The *status* of a constraint violation belongs to FIX-002
+      // — asserting 409 here would make this suite depend on that patch being applied too.
+      const duplicate = await post(app, '/rest/v1/users', { id: 2, email: 'a@b.co' })
+      assert.ok(duplicate.status >= 400, `the duplicate was accepted: ${duplicate.status}`)
+
+      const rows = (await connection.exec('SELECT id FROM users')) as { rows: { id: number }[] }
+      assert.deepEqual(
+         (rows.rows ?? []).map((r) => r.id),
+         [1],
+      )
+   })
+
+   test('a plain index becomes partial, and back', async () => {
+      const table = 'CREATE TABLE notes (id int primary key, body text, archived boolean);\n'
+      const plain = `${table}CREATE INDEX notes_body ON notes (body);`
+      const partial = `${table}CREATE INDEX notes_body ON notes (body) WHERE archived = false;`
+
+      const { connection } = await migrate(plain)
+      assert.doesNotMatch(await indexSql(connection, 'notes_body'), /WHERE/i)
+
+      await (await connection.createMigrator(partial)).migrate()
+      assert.match(await indexSql(connection, 'notes_body'), /WHERE\s+archived = false/)
+
+      await (await connection.createMigrator(plain)).migrate()
+      assert.doesNotMatch(await indexSql(connection, 'notes_body'), /WHERE/i)
+   })
+
+   // Adding a column rebuilds the table, and the planner reassembles every index while it does.
+   test('the predicate survives a table rebuild', async () => {
+      const { connection } = await migrate(USERS)
+      await (
+         await connection.createMigrator(
+            [
+               'CREATE TABLE users (id int primary key, email text not null, deleted_at timestamptz, note text);',
+               'CREATE UNIQUE INDEX users_live_email ON users (email) WHERE deleted_at IS NULL;',
+            ].join('\n'),
+         )
+      ).migrate()
+
+      assert.match(await indexSql(connection, 'users_live_email'), /WHERE\s+deleted_at IS NULL/)
+   })
+
    test('a migration that only changes the predicate is noticed', async () => {
       const table = 'CREATE TABLE notes (id int primary key, body text, archived boolean);\n'
       const { connection } = await migrate(`${table}CREATE INDEX notes_body ON notes (body) WHERE archived = false;`)
@@ -106,16 +155,47 @@ describe('FIX-001 partial indexes keep their predicate', () => {
       assert.equal(index?.where, 'a > 0')
    })
 
-   // The predicate is compared as text, so the same condition written differently would plan a
-   // migration that changes nothing. It does not: both sides reach the model through the same parser,
-   // translator and introspection, which is what normalises them.
-   test('the same predicate written differently is not a change', async () => {
+   // An identifier is not a word boundary away from WHERE in every alphabet, so the filter is looked
+   // for only after the indexed expressions close. `індексWHERE` reported `ON t(a)` as its predicate.
+   test('WHERE inside an index name is not mistaken for the filter', async () => {
+      const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
+      await connection.exec('CREATE TABLE t (a int)')
+      await connection.exec('CREATE INDEX індексWHERE ON t (a)')
+      await connection.exec('CREATE INDEX індексWHERE2 ON t (a) WHERE a > 0')
+
+      const found = new Map(
+         (await connection.introspect()).indexes.map((index: { name: string; where?: string | null }) => [
+            index.name,
+            index.where,
+         ]),
+      )
+      assert.equal(found.get('індексWHERE'), null)
+      assert.equal(found.get('індексWHERE2'), 'a > 0')
+   })
+
+   // Both sides normally reach the model through the same translator, which spaces them identically.
+   // An index created directly does not, and whitespace is not a difference worth rebuilding a table
+   // for. Written as raw SQL because that is the only way to reach the unnormalised path.
+   test('the same predicate spaced differently is not a change', async () => {
       const table = 'CREATE TABLE t (a int, note text);\n'
-      const { connection } = await migrate(`${table}CREATE INDEX i ON t (a) WHERE a > 0;`)
+      const { connection } = await migrate(table)
+      await connection.exec('CREATE INDEX i ON t(a) WHERE a>0')
 
       const { diff } = (await (
-         await connection.createMigrator(`${table}CREATE INDEX i ON t (a) WHERE a>0;`)
+         await connection.createMigrator(`${table}CREATE INDEX i ON t (a) WHERE a > 0;`)
       ).diff()) as { diff: { has_changes: boolean } }
       assert.equal(diff.has_changes, false)
+   })
+
+   // …while a predicate that differs in more than spacing still is one.
+   test('a predicate differing in more than spacing is a change', async () => {
+      const table = 'CREATE TABLE t (a int, note text);\n'
+      const { connection } = await migrate(table)
+      await connection.exec('CREATE INDEX i ON t(a) WHERE a>1')
+
+      const { diff } = (await (
+         await connection.createMigrator(`${table}CREATE INDEX i ON t (a) WHERE a > 0;`)
+      ).diff()) as { diff: { has_changes: boolean } }
+      assert.equal(diff.has_changes, true)
    })
 })

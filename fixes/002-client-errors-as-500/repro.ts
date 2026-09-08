@@ -30,40 +30,44 @@ CREATE POLICY mine ON checked FOR ALL USING (true) WITH CHECK (false);`)
 const session = (await post(rls.app, '/auth/v1/signup', { email: 'a@b.co', password: 'password123' })).body
 const auth = { Authorization: `Bearer ${session.access_token}` }
 
-let escaped = false
-for (const [table, label] of [
-   ['checked', '#2  WITH CHECK on a policy'],
-   ['notes', '#2  no policy for INSERT at all'],
-] as const) {
+let wrong = false
+for (const [table, label, status, code] of [
+   ['checked', '#2  WITH CHECK on a policy', 403, 'PGRST301'],
+   ['notes', '#2  no policy for INSERT at all', 403, '42501'],
+] as [string, string, number, string][]) {
    const r = await post(rls.app, `/rest/v1/${table}`, { id: 1, body: 'x' }, auth)
-   show(label, `${r.status} ${pgrstCode(r)} — ${r.body?.message}`)
-   escaped ||= r.status >= 500
+   const asExpected = r.status === status && pgrstCode(r) === code
+   show(label, `${r.status} ${pgrstCode(r)} ${asExpected ? '' : `(expected ${status} ${code})`}`)
+   wrong ||= !asExpected
 }
 
 // --- #3 and #4 — constraint violations ------------------------------------------------------------
 const db: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
 await (
    await db.connection
-      .createMigrator(`CREATE TABLE items (id int primary key, nums int[], price numeric(8,2), born date);
+      .createMigrator(`CREATE TABLE items (id int primary key, nums int[], quantity int check (quantity > 0), born date);
 CREATE TABLE authors (id int primary key, name text not null);
 CREATE TABLE books (id int primary key, author_id int references authors(id));`)
 ).migrate()
 await post(db.app, '/rest/v1/authors', { id: 1, name: 'Ursula' })
 
 console.log()
-for (const [label, table, body] of [
+// Each case names the answer PostgREST gives, so the verdict is what was expected against what
+// arrived — not merely the absence of a 5xx, which any other wrong status would also satisfy.
+for (const [label, table, body, status, code] of [
    // A named CHECK is raised as its own error class and answers correctly — the working neighbour
    // that makes the rest read as one missing code rather than a conversion step that never runs.
-   ['#3  named CHECK (int[] element)', 'items', { id: 1, nums: 'not-an-array' }],
-   ['#3  unnamed CHECK (numeric(8,2))', 'items', { id: 2, price: 1.005 }],
-   ['#3  unnamed CHECK (date validity)', 'items', { id: 3, born: 'not-a-date' }],
-   ['#4  duplicate primary key', 'authors', { id: 1, name: 'Ursula' }],
-   ['#4  NOT NULL violation', 'authors', { id: 2, name: null }],
-   ['#4  dangling foreign key', 'books', { id: 1, author_id: 999 }],
-] as [string, string, Record<string, unknown>][]) {
+   ['#3  named CHECK (int[] element)', 'items', { id: 1, nums: 'not-an-array' }, 400, '23514'],
+   ['#3  unnamed CHECK (quantity > 0)', 'items', { id: 2, quantity: -1 }, 400, '23514'],
+   ['#3  unnamed CHECK (date validity)', 'items', { id: 3, born: 'not-a-date' }, 400, '23514'],
+   ['#4  duplicate primary key', 'authors', { id: 1, name: 'Ursula' }, 409, '23505'],
+   ['#4  NOT NULL violation', 'authors', { id: 2, name: null }, 400, '23502'],
+   ['#4  dangling foreign key', 'books', { id: 1, author_id: 999 }, 409, '23503'],
+] as [string, string, Record<string, unknown>, number, string][]) {
    const r = await post(db.app, `/rest/v1/${table}`, body, { Prefer: 'return=representation' })
-   show(label, `${r.status} ${pgrstCode(r)} — ${String(r.body?.message ?? '').slice(0, 46)}`)
-   escaped ||= r.status >= 500
+   const asExpected = r.status === status && pgrstCode(r) === code
+   show(label, `${r.status} ${pgrstCode(r)} ${asExpected ? '' : `(expected ${status} ${code})`}`)
+   wrong ||= !asExpected
 }
 
 // #4 is not a missing branch: the SQLSTATE branches are right, but the step before them never fires
@@ -80,7 +84,7 @@ try {
 }
 
 console.log(
-   escaped
+   wrong
       ? '\n  AS DESCRIBED: a caller cannot tell "you may not" or "your data is wrong" from "the server broke", so it retries what can never succeed\n'
-      : '\n  DIFFERS: every refusal now answers with its own status and code — this is the patched build\n',
+      : '\n  DIFFERS: every refusal answers with the status and code PostgREST gives it\n',
 )

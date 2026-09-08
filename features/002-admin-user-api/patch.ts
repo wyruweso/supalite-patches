@@ -17,9 +17,18 @@
 //   createSessionForUser    a soft-deleted user is refused a session
 //
 // The second is not tidiness: `deleted_at` occurs once in the published bundle, in the DDL creating
-// the column, so nothing honours it and a soft-deleted address would still receive codes from
-// `/auth/v1/otp`. One wrapper on the method every sign-in flow ends at; guarding the flows
-// themselves would cost five and miss the sixth.
+// the column, so nothing honours it. One wrapper on the method every sign-in flow ends at; guarding
+// the flows themselves would cost five and miss the sixth.
+//
+// The soft delete follows GoTrue: the row and its id stay so references resolve, and the identifiers
+// are replaced with `base64url(sha256(id + value))` rather than kept. Keeping them, as an earlier
+// version did, leaves the address registered for ever — creating that user again answers
+// `email_exists` for somebody nobody can reach.
+//
+// This patch must apply on its own, so the MFA factor table it clears may not exist. Its presence is
+// asked with a harmless read *before* the transaction opens: the driver wraps a missing table into
+// `Failed to prepare statement` and loses the cause, so a query inside the transaction cannot be
+// told apart from a real failure and would roll the whole delete back.
 import {
    argumentOfCall,
    functionWithText,
@@ -52,7 +61,17 @@ export const expectedDivergence = [
    'FEAT-002 admin user API > a malformed body is bad JSON, not a missing field',
    'FEAT-002 admin user API > a duplicate address is refused',
    'FEAT-002 admin user API > a user can be deleted, and their sessions go with them',
-   'FEAT-002 admin user API > a soft delete empties the user rather than removing it',
+   'FEAT-002 admin user API > a soft delete empties the user and unnames them',
+   'FEAT-002 admin user API > malformed input is refused before anything happens',
+   'FEAT-002 admin user API > malformed input is refused before anything happens > a should_soft_delete that is not a boolean is a 400, and keeps the user',
+   'FEAT-002 admin user API > malformed input is refused before anything happens > a body that is not an object is bad JSON',
+   'FEAT-002 admin user API > malformed input is refused before anything happens > ?page=1.5 is a 400, not a 500',
+   'FEAT-002 admin user API > malformed input is refused before anything happens > ?per_page=1.5 is a 400, not a 500',
+   'FEAT-002 admin user API > malformed input is refused before anything happens > ?page=Infinity is a 400, not a 500',
+   'FEAT-002 admin user API > malformed input is refused before anything happens > ?page=0 is a 400, not a 500',
+   'FEAT-002 admin user API > malformed input is refused before anything happens > ?per_page=-1 is a 400, not a 500',
+   'FEAT-002 admin user API > phone_confirm marks the number confirmed',
+   'FEAT-002 admin user API > a minimum password length longer than the generator is still satisfied',
    'FEAT-002 admin user API > a soft-deleted user cannot sign in by any path this build offers',
    'FEAT-002 admin user API > a stale access token dies on the auth API and outlives the delete on the data API',
    'FEAT-002 admin user API > a password_hash that is not a bcrypt hash is refused',

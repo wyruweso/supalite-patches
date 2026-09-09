@@ -625,4 +625,28 @@ describe('FEAT-002 admin user API', () => {
       assert.equal(r.status, 200)
       assert.equal(r.body.role, 'authenticated')
    })
+
+   // Length alone is not enough: a configured requirement can demand a character class that random
+   // draws need not produce, and the route would then refuse the password it generated for itself.
+   test('a generated password satisfies the configured character classes', async () => {
+      const strict: { app: LiteApp } = await newRawApp({
+         auth: {
+            enabled: true,
+            jwt_secret: JWT_SECRET,
+            site_url: 'http://localhost:3000',
+            password_requirements: 'lower_upper_letters_digits_symbols',
+         },
+      })
+
+      const real = crypto.getRandomValues.bind(crypto)
+      try {
+         // Every draw the same, so nothing is left to chance.
+         ;(crypto as unknown as { getRandomValues: (a: ArrayBufferView) => ArrayBufferView }).getRandomValues = (a) =>
+            new Uint8Array(a.buffer, a.byteOffset, a.byteLength).fill(0) && a
+         const r = await req(strict.app, 'POST', '/auth/v1/admin/users', { email: 'generated@b.co' }, admin)
+         assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 140))
+      } finally {
+         ;(crypto as unknown as { getRandomValues: unknown }).getRandomValues = real
+      }
+   })
 })

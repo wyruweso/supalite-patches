@@ -233,14 +233,8 @@ describe('FIX-001 partial indexes keep their predicate', () => {
       assert.equal(diff.has_changes, true)
    })
 
-   /**
-    * The one place two patches write to the same plan: FIX-005 removes and recreates triggers around
-    * a rebuild, FIX-001 appends the predicate to the `add_index` step inside it. Neither suite covers
-    * the pair, and each wraps `plan`, so a mistake here would look like a bug in the other patch.
-    *
-    * The trigger half is asserted only when the first migration created one, so this still passes
-    * with only FIX-001 applied.
-    */
+   // The one place two patches write to the same plan: FIX-005 moves triggers around a rebuild,
+   // FIX-001 appends the predicate to the add_index step inside it.
    test('a rebuild keeps the predicate, and any triggers with it', async () => {
       const schema = (extra: string) =>
          [
@@ -260,9 +254,8 @@ describe('FIX-001 partial indexes keep their predicate', () => {
 
       assert.match(await indexSql(connection, 'users_live_email'), /WHERE\s+deleted_at IS NULL/)
 
-      // Only when a trigger was there to keep. Without FIX-005 the first migration creates none, and
-      // the rebuild then creates one from the desired schema — the published build's own behaviour,
-      // and not this patch's to assert.
+      // Only when a trigger was there to keep: without FIX-005 the first migration creates none, and
+      // the rebuild then creates one from the desired schema — the published build's own behaviour.
       if (triggersBefore.length) {
          assert.deepEqual(await triggerNames(connection), triggersBefore, 'the rebuild changed which triggers exist')
       }
@@ -274,6 +267,15 @@ describe('FIX-001 partial indexes keep their predicate', () => {
          () => connection.exec("INSERT INTO users (id, email) VALUES (4, 'c@b.co')"),
          /UNIQUE constraint failed/,
       )
+
+      // A trigger that exists but no longer fires would pass every check above.
+      if (triggersBefore.length) {
+         const logged = (await connection.exec('SELECT id FROM log ORDER BY id')) as { rows?: { id: number }[] }
+         assert.deepEqual(
+            (logged.rows ?? []).map((row) => row.id),
+            [1, 2, 3],
+         )
+      }
    })
 })
 

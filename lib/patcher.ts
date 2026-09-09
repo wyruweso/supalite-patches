@@ -574,6 +574,7 @@ const GLOBALS = new Set([
    'Symbol',
    'TextDecoder',
    'TextEncoder',
+   'Uint32Array',
    'Uint8Array',
    'undefined',
    'URL',

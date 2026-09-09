@@ -3,7 +3,7 @@ interface Connection {
 }
 
 interface HonoContext {
-   req: { param(name: string): string; json(): Promise<unknown> }
+   req: { param(name: string): string; json(): Promise<unknown>; text(): Promise<string> }
    var: { authService: AuthService }
    get(key: string): unknown
    json(body: unknown, status?: number): Response
@@ -74,19 +74,29 @@ function registerMfaRoutes(): void {
       const insufficient = await requireMfaForAdditionalFactor(c, user.id)
       if (insufficient) return insufficient
 
-      const body = ((await c.req.json().catch(() => ({}))) ?? {}) as {
-         factor_type?: string
-         friendly_name?: string
-         issuer?: string
+      const body = await readBody(c)
+      if (!body) return invalid(c, 'Could not parse the request body as JSON', 'bad_json')
+      if (body.factor_type !== undefined && body.factor_type !== 'totp') {
+         return invalid(c, 'Only totp is supported', 'validation_failed', 422)
       }
-      if (body.factor_type && body.factor_type !== 'totp') {
-         return c.json({ code: 422, error_code: 'validation_failed', msg: 'Only totp is supported' }, 422)
+      for (const field of ['friendly_name', 'issuer'] as const) {
+         if (body[field] !== undefined && typeof body[field] !== 'string') {
+            return invalid(c, `${field} must be a string`, 'validation_failed')
+         }
       }
 
       const connection = connectionOf(c)
       const id = crypto.randomUUID()
       const secret = randomBase32Secret()
-      const friendlyName = body.friendly_name ?? 'TOTP'
+      const friendlyName = (body.friendly_name as string | undefined) ?? 'TOTP'
+
+      // Built before the insert: anything that throws while assembling it would otherwise leave a
+      // factor behind, holding its name against the retry.
+      const issuer = (body.issuer as string | undefined) ?? 'Supabase'
+      const label = typeof user.email === 'string' && user.email ? user.email : user.id
+      const uri =
+         `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(label)}` +
+         `?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=${STEP_SECONDS}`
 
       // Enforce name uniqueness in the database while retaining the original spelling.
       const now = new Date().toISOString()
@@ -113,13 +123,6 @@ function registerMfaRoutes(): void {
             422,
          )
       }
-
-      // The label identifies the account; friendly_name identifies this particular factor.
-      const issuer = body.issuer ?? 'Supabase'
-      const label = typeof user.email === 'string' && user.email ? user.email : user.id
-      const uri =
-         `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(label)}` +
-         `?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=${STEP_SECONDS}`
 
       // Return the otpauth URI for client-side QR generation; qr_code requires an SVG encoder.
       return c.json({ id, type: 'totp', friendly_name: friendlyName, totp: { secret, uri } }, 200)
@@ -328,6 +331,25 @@ async function recordFailedAttempt(connection: Connection, factorId: string, cha
       MAX_ATTEMPTS,
    )
 }
+
+/**
+ * `{}` for an absent body, `null` for anything that is not a JSON object. Read as text first, since
+ * `json()` rejects the same way for an empty body and for a malformed one.
+ */
+async function readBody(c: HonoContext): Promise<Record<string, unknown> | null> {
+   const text = (await c.req.text().catch(() => '')).trim()
+   if (!text) return {}
+   try {
+      const raw: unknown = JSON.parse(text)
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+      return raw as Record<string, unknown>
+   } catch {
+      return null
+   }
+}
+
+const invalid = (c: HonoContext, msg: string, code: string, status = 400) =>
+   c.json({ code: status, error_code: code, msg }, status)
 
 async function findFactor(connection: Connection, id: string, userId: string) {
    const result = await connection.exec('SELECT * FROM "auth.mfa_factors" WHERE id = ? AND user_id = ?', id, userId)

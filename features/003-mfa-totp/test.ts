@@ -12,6 +12,7 @@ import {
    newRawApp,
    get,
    post,
+   req,
    JWT_SECRET,
    type LiteApp,
    type LiteConnection,
@@ -712,5 +713,35 @@ describe('FEAT-003 TOTP second factor', () => {
          `the upgraded auth schema was planned against: ${JSON.stringify(diff.tables)}`,
       )
       await (await connection.createMigrator('CREATE TABLE notes (id int primary key, body text);')).migrate()
+   })
+
+   // A request that fails must not leave a factor behind holding its name against the retry.
+   describe('a malformed enrolment leaves nothing', () => {
+      const enrolRaw = (u: Enrolled, body: Record<string, unknown>) => post(u.app, '/auth/v1/factors', body, u.auth)
+
+      const factorCount = async (u: Enrolled) =>
+         (((await u.connection.exec('SELECT id FROM "auth.mfa_factors"')) as { rows?: unknown[] }).rows ?? []).length
+
+      test('a body that is not a JSON object is refused', async () => {
+         const u = await newUser()
+         for (const body of ['{', '[]', '"totp"']) {
+            const r = await req(u.app, 'POST', '/auth/v1/factors', body, {
+               ...u.auth,
+               'Content-Type': 'application/json',
+            })
+            assert.equal(r.status, 400, `${body} was accepted`)
+         }
+         assert.equal(await factorCount(u), 0)
+      })
+
+      test('a field of the wrong type is refused before anything is written', async () => {
+         const u = await newUser()
+         assert.equal((await enrolRaw(u, { friendly_name: { a: 1 } })).status, 400)
+         assert.equal((await enrolRaw(u, { issuer: { toString: null } })).status, 400)
+         assert.equal(await factorCount(u), 0)
+
+         // And the name it would have taken is still free.
+         assert.ok((await enroll(u, { friendly_name: 'TOTP' })).id)
+      })
    })
 })

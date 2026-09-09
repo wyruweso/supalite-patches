@@ -376,12 +376,23 @@ async function obfuscateIdentifiers(
 
 /** Generate at least 64 characters, respecting the configured minimum password length. */
 function randomPassword(config: { minimum_password_length?: number }): string {
-   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*'
+   // One from each class first, then the rest: the configured requirements can demand a class that
+   // random draws are not guaranteed to produce, and the route would refuse its own credential.
+   const classes = ['ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz', '0123456789', '!@#$%^&*']
+   const alphabet = classes.join('')
    const length = Math.max(64, Number(config.minimum_password_length) || 0)
+
    const bytes = crypto.getRandomValues(new Uint8Array(length))
-   let password = ''
-   for (const byte of bytes) password += alphabet[byte % alphabet.length]
-   return password
+   const characters = classes.map((set, index) => set[bytes[index] % set.length])
+   for (let at = classes.length; at < length; at++) characters.push(alphabet[bytes[at] % alphabet.length])
+
+   // Shuffled so the classes are not always in the same first four positions.
+   const order = crypto.getRandomValues(new Uint32Array(length))
+   for (let at = length - 1; at > 0; at--) {
+      const swap = order[at] % (at + 1)
+      ;[characters[at], characters[swap]] = [characters[swap], characters[at]]
+   }
+   return characters.join('')
 }
 
 /** supabase-js requires a last link and reads the page number from the first query parameter. */

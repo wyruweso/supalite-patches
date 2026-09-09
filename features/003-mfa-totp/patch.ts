@@ -50,6 +50,9 @@ export const expectedDivergence = [
    'FEAT-003 TOTP second factor > one use each > concurrent wrong codes are all counted',
    'FEAT-003 TOTP second factor > a session that already passed MFA is left alone',
    'FEAT-003 TOTP second factor > a migration after the upgrade plans nothing for the MFA tables',
+   'FEAT-003 TOTP second factor > a malformed enrolment leaves nothing',
+   'FEAT-003 TOTP second factor > a malformed enrolment leaves nothing > a body that is not a JSON object is refused',
+   'FEAT-003 TOTP second factor > a malformed enrolment leaves nothing > a field of the wrong type is refused before anything is written',
 ]
 
 const routes = new URL('./src/auth/mfa.ts', import.meta.url)

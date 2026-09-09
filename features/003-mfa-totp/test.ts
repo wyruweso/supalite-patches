@@ -688,4 +688,29 @@ describe('FEAT-003 TOTP second factor', () => {
       })
       assert.equal(refreshed.status, 200, 'a session that had passed MFA was ended')
    })
+
+   // ALTER TABLE appends the column; the schema constant declares it in the middle. Column order must
+   // not make an upgraded database look changed.
+   test('a migration after the upgrade plans nothing for the MFA tables', async () => {
+      const { app, connection }: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
+
+      await connection.exec('ALTER TABLE "auth.mfa_factors" DROP COLUMN last_verified_step')
+      await (app as unknown as { ensureSystemSchema(): Promise<void> }).ensureSystemSchema()
+
+      const columns = ((await connection.exec("SELECT name FROM pragma_table_info('auth.mfa_factors')")).rows ??
+         []) as { name: string }[]
+      assert.equal(columns[columns.length - 1].name, 'last_verified_step', 'ALTER TABLE appends the column')
+
+      const { diff, plan } = (await (
+         await connection.createMigrator('CREATE TABLE notes (id int primary key, body text);')
+      ).diff()) as { diff: { tables?: unknown[] }; plan?: { steps: { type: string }[] } }
+
+      const touched = (plan?.steps ?? []).filter((step) => /trigger|table|index/.test(step.type))
+      assert.deepEqual(
+         touched.map((step) => step.type),
+         ['create_table'],
+         `the upgraded auth schema was planned against: ${JSON.stringify(diff.tables)}`,
+      )
+      await (await connection.createMigrator('CREATE TABLE notes (id int primary key, body text);')).migrate()
+   })
 })

@@ -306,4 +306,26 @@ describe('FEAT-001 anonymous sign-in', () => {
       assert.equal(r.body.user.email, 'a@b.co')
       assert.deepEqual(r.body.user.app_metadata, { provider: 'email', providers: ['email'] })
    })
+
+   // Nothing else identifies an anonymous user, so a collision here would be a takeover.
+   test('an anonymous user cannot claim an address that is taken', async () => {
+      const { app }: { app: LiteApp } = await newAnonApp()
+      await post(app, '/auth/v1/signup', { email: 'taken@b.co', password: 'password123' })
+
+      const session = (await anon(app)).body
+      const claim = await req(
+         app,
+         'PUT',
+         '/auth/v1/user',
+         { email: 'taken@b.co' },
+         { Authorization: `Bearer ${session.access_token}` },
+      )
+      assert.equal(claim.status, 422, JSON.stringify(claim.body).slice(0, 120))
+      assert.equal(claim.body.error_code, 'email_exists')
+
+      // And nothing was staged on the anonymous row for a later verify to complete.
+      const user = await get(app, '/auth/v1/user', { Authorization: `Bearer ${session.access_token}` })
+      assert.equal(user.body.new_email ?? null, null)
+      assert.equal(user.body.is_anonymous, true)
+   })
 })

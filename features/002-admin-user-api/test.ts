@@ -15,6 +15,8 @@ import {
    type LiteConnection,
 } from '../../test/harness.ts'
 
+const claimsOf = (token: string) => JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
+
 // An administrator presents an ordinary JWT with the `service_role` role, signed with the project
 // secret — what supabase-js does with a service key. `sub` must be a real UUID: the zero UUID with
 // this role is refused separately.
@@ -572,5 +574,55 @@ describe('FEAT-002 admin user API', () => {
 
       const [row] = await rows(strict.connection, 'SELECT encrypted_password FROM "auth.users"')
       assert.match(String(row.encrypted_password), /^\$2[aby]\$/, 'the user was left without a password')
+   })
+
+   /**
+    * `role` is an ordinary admin field in GoTrue, and this route passes it through as upstream does.
+    * Pinned rather than restricted, because the consequence is sharper here than the field looks: in
+    * this build `service_role` bypasses RLS, so a user created with that role holds a password login
+    * that reads every table. An administrator can do that deliberately; nobody should do it by
+    * accident, and a change that started defaulting it would show up here.
+    */
+   test('a role given at creation reaches the token, service_role included', async () => {
+      const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
+      await (
+         await fresh.connection.createMigrator(
+            [
+               'CREATE TABLE secrets (id int primary key, body text);',
+               'ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;',
+               'CREATE POLICY nobody ON secrets FOR ALL USING (false) WITH CHECK (true);',
+            ].join('\n'),
+         )
+      ).migrate()
+      await fresh.connection.exec("INSERT INTO secrets (id, body) VALUES (1, 'classified')")
+
+      const created = await req(
+         fresh.app,
+         'POST',
+         '/auth/v1/admin/users',
+         { email: 'elevated@b.co', password: 'password123', role: 'service_role', email_confirm: true },
+         admin,
+      )
+      assert.equal(created.status, 200, JSON.stringify(created.body).slice(0, 140))
+      assert.equal(created.body.role, 'service_role')
+
+      const session = await post(fresh.app, '/auth/v1/token?grant_type=password', {
+         email: 'elevated@b.co',
+         password: 'password123',
+      })
+      assert.equal(session.status, 200, JSON.stringify(session.body).slice(0, 140))
+      assert.equal(claimsOf(session.body.access_token).role, 'service_role')
+
+      const read = await get(fresh.app, '/rest/v1/secrets?select=body', {
+         Authorization: `Bearer ${session.body.access_token}`,
+      })
+      assert.deepEqual(read.body, [{ body: 'classified' }], 'service_role no longer bypasses RLS')
+   })
+
+   // The default is unchanged: an ordinary create is `authenticated`.
+   test('a create without a role is authenticated', async () => {
+      const r = await req(app, 'POST', '/auth/v1/admin/users', { email: 'plain-role@b.co' }, admin)
+      assert.equal(r.status, 200)
+      assert.equal(r.body.role, 'authenticated')
    })
 })

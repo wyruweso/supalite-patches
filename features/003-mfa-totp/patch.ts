@@ -49,6 +49,7 @@ export const expectedDivergence = [
    'FEAT-003 TOTP second factor > one use each > the same code is refused through a second challenge',
    'FEAT-003 TOTP second factor > one use each > concurrent wrong codes are all counted',
    'FEAT-003 TOTP second factor > a session that already passed MFA is left alone',
+   'FEAT-003 TOTP second factor > a migration after the upgrade plans nothing for the MFA tables',
 ]
 
 const routes = new URL('./src/auth/mfa.ts', import.meta.url)

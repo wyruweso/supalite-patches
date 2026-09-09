@@ -120,4 +120,27 @@ describe('FIX-004 publication statements do not reach the DDL', () => {
          ['kept'],
       )
    })
+
+   // Everything these patches touch, migrated twice: churn here would rebuild the database on every
+   // run. Holds with any subset, since both sides go through the same translator.
+   test('a schema with a publication, a partial index and a trigger is migrated once', async () => {
+      const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
+      const full = [
+         'CREATE TABLE users (id int primary key, email text, deleted_at timestamptz);',
+         'CREATE TABLE log (id int primary key, note text);',
+         'CREATE UNIQUE INDEX users_live_email ON users (email) WHERE deleted_at IS NULL;',
+         "CREATE FUNCTION copy_row() RETURNS trigger AS $$ BEGIN INSERT INTO public.log (id, note) VALUES (NEW.id, 'x'); RETURN NEW; END; $$ LANGUAGE plpgsql;",
+         'CREATE TRIGGER on_users AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION copy_row();',
+         'ALTER PUBLICATION supabase_realtime ADD TABLE users;',
+      ].join('\n')
+
+      await (await connection.createMigrator(full)).migrate()
+
+      const { diff, plan } = (await (await connection.createMigrator(full)).diff()) as {
+         diff: { has_changes: boolean }
+         plan?: { steps: unknown[] }
+      }
+      assert.equal(diff.has_changes, false)
+      assert.deepEqual(plan?.steps ?? [], [])
+   })
 })

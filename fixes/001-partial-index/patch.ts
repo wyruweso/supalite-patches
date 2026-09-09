@@ -23,6 +23,7 @@ export const expectedDivergence = [
    'FIX-001 partial indexes keep their predicate > a WHERE inside the statement is not mistaken for the filter',
    'FIX-001 partial indexes keep their predicate > an index whose name contains a quote keeps its predicate',
    'FIX-001 partial indexes keep their predicate > the predicate survives a table rebuild',
+   'FIX-001 partial indexes keep their predicate > a rebuild keeps the predicate, and any triggers with it',
    'FIX-001 partial indexes keep their predicate > WHERE inside an index name is not mistaken for the filter',
    'FIX-001 partial indexes keep their predicate > a predicate differing in more than spacing is a change',
    'FIX-001 partial indexes keep their predicate > a plain index becomes partial, and back',

@@ -22,6 +22,7 @@ export const expectedDivergence = [
    'FEAT-001 anonymous sign-in > signing out ends the session',
    'FEAT-001 anonymous sign-in > the session works against the Data API',
    'FEAT-001 anonymous sign-in > metadata passed on sign-in is kept',
+   'FEAT-001 anonymous sign-in > an anonymous user cannot claim an address that is taken',
 ]
 
 // The library's own refusal, so its status and wording stay the library's. Bound in every splice

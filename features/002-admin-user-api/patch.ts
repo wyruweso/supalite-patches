@@ -19,6 +19,8 @@ export const title = 'core admin users API: list, get, create, delete'
 export const expectedDivergence = [
    'FEAT-002 admin user API',
    'FEAT-002 admin user API > listing users returns them',
+   'FEAT-002 admin user API > a role given at creation reaches the token, service_role included',
+   'FEAT-002 admin user API > a create without a role is authenticated',
    'FEAT-002 admin user API > a single user can be fetched by id',
    'FEAT-002 admin user API > the pagination headers supabase-js reads are present',
    'FEAT-002 admin user API > a user is created with sign-ups disabled, and is not signed in',

@@ -232,4 +232,54 @@ describe('FIX-001 partial indexes keep their predicate', () => {
       const { diff } = await (await connection.createMigrator(desired)).diff()
       assert.equal(diff.has_changes, true)
    })
+
+   /**
+    * The one place two patches write to the same plan: FIX-005 removes and recreates triggers around
+    * a rebuild, FIX-001 appends the predicate to the `add_index` step inside it. Neither suite covers
+    * the pair, and each wraps `plan`, so a mistake here would look like a bug in the other patch.
+    *
+    * The trigger half is asserted only when the first migration created one, so this still passes
+    * with only FIX-001 applied.
+    */
+   test('a rebuild keeps the predicate, and any triggers with it', async () => {
+      const schema = (extra: string) =>
+         [
+            `CREATE TABLE users (id int primary key, email text, deleted_at timestamptz${extra});`,
+            'CREATE TABLE log (id int primary key, note text);',
+            'CREATE UNIQUE INDEX users_live_email ON users (email) WHERE deleted_at IS NULL;',
+            "CREATE FUNCTION copy_row() RETURNS trigger AS $$ BEGIN INSERT INTO public.log (id, note) VALUES (NEW.id, 'x'); RETURN NEW; END; $$ LANGUAGE plpgsql;",
+            'CREATE TRIGGER on_users_insert AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION copy_row();',
+         ].join('\n')
+
+      const { connection } = await migrate(schema(''))
+      await connection.exec("INSERT INTO users (id, email) VALUES (1, 'a@b.co')")
+      const triggersBefore = await triggerNames(connection)
+
+      // Adding a column of a new type rebuilds the table, taking its indexes and triggers with it.
+      await (await connection.createMigrator(schema(', note text'))).migrate({ force: true })
+
+      assert.match(await indexSql(connection, 'users_live_email'), /WHERE\s+deleted_at IS NULL/)
+
+      // Only when a trigger was there to keep. Without FIX-005 the first migration creates none, and
+      // the rebuild then creates one from the desired schema — the published build's own behaviour,
+      // and not this patch's to assert.
+      if (triggersBefore.length) {
+         assert.deepEqual(await triggerNames(connection), triggersBefore, 'the rebuild changed which triggers exist')
+      }
+
+      // And the predicate still means what it says, on the rebuilt table.
+      await connection.exec("INSERT INTO users (id, email, deleted_at) VALUES (2, 'c@b.co', '2020-01-01')")
+      await connection.exec("INSERT INTO users (id, email) VALUES (3, 'c@b.co')")
+      await assert.rejects(
+         () => connection.exec("INSERT INTO users (id, email) VALUES (4, 'c@b.co')"),
+         /UNIQUE constraint failed/,
+      )
+   })
 })
+
+async function triggerNames(connection: LiteConnection): Promise<string[]> {
+   const result = (await connection.exec("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")) as {
+      rows?: { name: string }[]
+   }
+   return (result.rows ?? []).map((row) => row.name)
+}

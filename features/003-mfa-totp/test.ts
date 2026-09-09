@@ -2,7 +2,20 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { newApp, newRawApp, get, post, JWT_SECRET, type LiteApp, type LiteConnection } from '../../test/harness.ts'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createConnection } from '@supabase/lite/sqlite'
+import {
+   lite,
+   newApp,
+   newRawApp,
+   get,
+   post,
+   JWT_SECRET,
+   type LiteApp,
+   type LiteConnection,
+} from '../../test/harness.ts'
 
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
 
@@ -504,6 +517,92 @@ describe('FEAT-003 TOTP second factor', () => {
          assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 120))
          assert.equal(claimsOf(r.body.access_token).aal, 'aal2')
       })
+
+      test('either verified factor can establish aal2 on a new session', async () => {
+         const originalNow = Date.now
+         const timestamp = originalNow()
+         Date.now = () => timestamp
+         try {
+            const owner = await newUser()
+            const { factor: primary } = await verified(owner)
+            const backup = await enroll(owner, { friendly_name: 'Backup' })
+            const raised = await challenge(owner, backup.id)
+            const result = await verify(owner, backup.id, {
+               challenge_id: raised.id,
+               code: totp(backup.totp.secret),
+            })
+            assert.equal(result.status, 200)
+
+            for (const factor of [primary, backup]) {
+               const fresh = await passwordOnlySession(owner)
+               const challengeForLogin = await challenge(fresh, factor.id)
+               const signedIn = await verify(fresh, factor.id, {
+                  challenge_id: challengeForLogin.id,
+                  code: totp(factor.totp.secret, Math.floor(timestamp / 30000) + 1),
+               })
+               assert.equal(signedIn.status, 200, JSON.stringify(signedIn.body))
+               assert.equal(claimsOf(signedIn.body.access_token).aal, 'aal2')
+            }
+         } finally {
+            Date.now = originalNow
+         }
+      })
+   })
+
+   test('upgrades a persisted MFA schema without losing factors or pending challenges', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'lite-mfa-upgrade-'))
+      const url = join(directory, 'auth.sqlite')
+      let connection = createConnection({ url })
+      const config = { auth: { enabled: true, jwt_secret: JWT_SECRET, site_url: 'http://localhost:3000' } }
+
+      try {
+         const initial = new lite.App({ connection, ...config })
+         await initial.ensureSystemSchema()
+         const session = (await post(initial, '/auth/v1/signup', { email: 'upgrade@b.co', password: 'password123' }))
+            .body
+         const auth = { Authorization: `Bearer ${session.access_token}` }
+         const enrolled = await post(initial, '/auth/v1/factors', { factor_type: 'totp', friendly_name: 'Phone' }, auth)
+         assert.equal(enrolled.status, 200)
+         assert.ok(enrolled.body.id)
+         const factor = enrolled.body
+         const raised = await post(initial, `/auth/v1/factors/${factor.id}/challenge`, {}, auth)
+         assert.equal(raised.status, 200)
+
+         // Recreate the previous schema, then reopen the database through a fresh connection.
+         await connection.exec('ALTER TABLE "auth.mfa_factors" DROP COLUMN last_verified_step')
+         await connection.close()
+         connection = createConnection({ url })
+         const upgraded = new lite.App({ connection, ...config })
+         await upgraded.init()
+         await Promise.all([upgraded.ensureSystemSchema(), upgraded.ensureSystemSchema()])
+
+         const [stored] = (await connection.exec('SELECT * FROM "auth.mfa_factors"')).rows ?? []
+         assert.equal(stored.id, factor.id)
+         assert.equal(stored.secret, factor.totp.secret)
+         assert.equal(stored.challenge_id, raised.body.id)
+         assert.equal(stored.last_verified_step, 0)
+
+         const verified = await post(
+            upgraded,
+            `/auth/v1/factors/${factor.id}/verify`,
+            {
+               challenge_id: raised.body.id,
+               code: totp(factor.totp.secret),
+            },
+            auth,
+         )
+         assert.equal(verified.status, 200, JSON.stringify(verified.body))
+         assert.equal(claimsOf(verified.body.access_token).aal, 'aal2')
+
+         const [before] = (await connection.exec('SELECT last_verified_step FROM "auth.mfa_factors"')).rows ?? []
+         assert.ok(before.last_verified_step > 0)
+         await upgraded.ensureSystemSchema()
+         const [after] = (await connection.exec('SELECT last_verified_step FROM "auth.mfa_factors"')).rows ?? []
+         assert.equal(after.last_verified_step, before.last_verified_step)
+      } finally {
+         await connection.close()
+         await rm(directory, { recursive: true, force: true })
+      }
    })
 
    /**
@@ -577,7 +676,10 @@ describe('FEAT-003 TOTP second factor', () => {
       ).body
       const other = { ...first, auth: { Authorization: `Bearer ${second.access_token}` } }
       const raisedAgain = await challenge(other, factor.id)
-      const r = await verify(other, factor.id, { challenge_id: raisedAgain.id, code: totp(factor.totp.secret, step + 1) })
+      const r = await verify(other, factor.id, {
+         challenge_id: raisedAgain.id,
+         code: totp(factor.totp.secret, step + 1),
+      })
       assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 120))
 
       // The first device, which had already passed MFA, can still refresh.

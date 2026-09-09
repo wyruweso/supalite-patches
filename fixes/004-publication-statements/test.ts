@@ -115,6 +115,9 @@ describe('FIX-004 publication statements do not reach the DDL', () => {
       assert.deepEqual(plan?.steps ?? [], [])
 
       const rows = (await connection.exec('SELECT body FROM messages')) as { rows: { body: string }[] }
-      assert.deepEqual((rows.rows ?? []).map((r) => r.body), ['kept'])
+      assert.deepEqual(
+         (rows.rows ?? []).map((r) => r.body),
+         ['kept'],
+      )
    })
 })

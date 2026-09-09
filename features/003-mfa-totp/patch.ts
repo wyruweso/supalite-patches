@@ -1,21 +1,6 @@
-// FEAT-003 — TOTP as a second factor (`supabase.auth.mfa.*`).
-//
-// FEATURES.md marks this planned, effort M, no blocker, suggesting otplib. No library was needed:
-// RFC 6238 is thirty lines and `crypto.subtle` exists in every runtime this package targets,
-// including Workers. QR is the one thing a patch cannot honestly do; the enrol route says why.
-//
-// AAL is the point of MFA, and the schema was ready for it — `auth.sessions` already carries `aal`
-// and `factor_id`. Verifying a factor elevates the session in the database and the token is stamped
-// from that row, which is what makes `aal2` survive a refresh.
-//
-// Five anchors, because the level and the factors have to appear everywhere the SDK looks:
-//
-//   the auth schema DDL        the two tables, so the migrator sees them on both sides
-//   createApp                  the routes
-//   getUser                    user.factors — mfa.listFactors() reads them from there, not a route
-//   createSessionForUser       aal on a new token
-//   createRefreshResponse      aal on a refreshed one
-//
+// FEAT-003 — TOTP enrollment, verification, factor listing, and session claims.
+// Extends the auth DDL and upgrades existing MFA tables during ensureSystemSchema.
+// JWT helpers stay local so this feature can be applied independently.
 import {
    appendToConstant,
    argumentOfCall,
@@ -57,6 +42,8 @@ export const expectedDivergence = [
    'FEAT-003 TOTP second factor > a further factor needs the existing one > an aal1 session cannot enrol another factor',
    'FEAT-003 TOTP second factor > a further factor needs the existing one > an aal1 session cannot verify a factor enrolled earlier',
    'FEAT-003 TOTP second factor > a further factor needs the existing one > the owner still steps up from a password-only session',
+   'FEAT-003 TOTP second factor > a further factor needs the existing one > either verified factor can establish aal2 on a new session',
+   'FEAT-003 TOTP second factor > upgrades a persisted MFA schema without losing factors or pending challenges',
    'FEAT-003 TOTP second factor > one use each',
    'FEAT-003 TOTP second factor > one use each > two concurrent verifications with one challenge: exactly one succeeds',
    'FEAT-003 TOTP second factor > one use each > the same code is refused through a second challenge',
@@ -70,7 +57,14 @@ const session = new URL('./src/auth/session.ts', import.meta.url)
 export function apply(source: string): string {
    const schema = appendToConstant(source, { containing: 'users_email_partial_key', addition: MFA_SCHEMA_SQL })
 
-   const routed = wrapFunction(schema, {
+   const upgraded = wrapMethod(schema, {
+      at: methodNamed('ensureSystemSchema', 'getClient'),
+      replacement: new URL('./src/auth/migration.ts', import.meta.url),
+      exported: 'ensureSystemSchema',
+      originalAs: 'ensureSystemSchemaOriginal',
+   })
+
+   const routed = wrapFunction(upgraded, {
       at: functionWithText('/storage/v1/*'),
       replacement: routes,
       exported: 'createApp',

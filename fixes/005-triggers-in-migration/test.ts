@@ -168,8 +168,9 @@ describe('FIX-005 triggers survive a migration', () => {
       const { connection } = await migrate(COPY)
       await connection.exec("INSERT INTO dst (id, name) VALUES (1, 'kept')")
 
-      const types = ((await (await connection.createMigrator(withRequired)).diff()).plan.steps as { type: string }[])
-         .map((s) => s.type)
+      const types = (
+         (await (await connection.createMigrator(withRequired)).diff()).plan.steps as { type: string }[]
+      ).map((s) => s.type)
       assert.ok(types.indexOf('drop_trigger') < types.indexOf('copy_data'), `steps: ${types.join(', ')}`)
 
       await assert.rejects(

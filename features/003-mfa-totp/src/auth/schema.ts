@@ -1,11 +1,5 @@
-// The schema MFA needs, as Postgres DDL appended to the auth schema the library already carries.
-//
-// Appended rather than created at start-up, because the migrator builds the schema it compares
-// against by translating this DDL into a fresh database. A table created any other way exists only on
-// the live side, and the next migration plans to drop it.
-//
-// Remaining simplification: one challenge per factor, held in columns on the factor. Upstream keeps
-// challenges in their own table and can have two outstanding; here the second replaces the first.
+// Include MFA in the desired auth schema so later migrations retain its tables.
+// One outstanding challenge per factor; a new challenge replaces the previous one.
 export const MFA_SCHEMA_SQL = `
 -- ============================================================
 -- MFA
@@ -21,34 +15,22 @@ CREATE TABLE IF NOT EXISTS auth.mfa_factors (
   challenge_id          text,
   challenge_expires_at  text,
   challenge_attempts    integer NOT NULL DEFAULT 0,
-  -- The last time step a code was accepted for. RFC 6238 5.2 requires an OTP to be usable once, and
-  -- clearing the challenge alone does not give that: a second challenge would accept the same code
-  -- for the rest of its 30 seconds. Compared and written in the statement that consumes a challenge.
+  -- Reject OTP reuse across challenges. migration.ts adds this column to existing tables.
   last_verified_step    integer NOT NULL DEFAULT 0,
   created_at            timestamptz DEFAULT now(),
   updated_at            timestamptz DEFAULT now()
 );
 
--- Upstream writes this as a partial index, unique WHERE the name is not blank. A predicate would
--- depend on FIX-001 being applied alongside, and these patches are independent, so an expression
--- index says the same thing: a blank name indexes as NULL, and NULL does not collide. The column is
--- untouched, so a name comes back exactly as written.
---
--- Upstream compares trim(friendly_name) <> ''. trim does not survive translation here (the parser
--- calls it btrim, which the translator refuses by name), so a name of nothing but spaces takes part
--- in uniqueness where upstream would exempt it.
+-- NULLIF permits repeated empty names without depending on the partial-index patch.
+-- Whitespace-only names still participate: trim/btrim is unsupported by this translator.
 CREATE UNIQUE INDEX IF NOT EXISTS mfa_factors_user_friendly_name_key
   ON auth.mfa_factors (user_id, (NULLIF(friendly_name, '')));
 
--- What listing a user's factors actually asks for: WHERE user_id = ? ORDER BY created_at.
+-- Supports factor listing by user, ordered by creation time.
 CREATE INDEX IF NOT EXISTS mfa_factors_user_id_created_at_idx
   ON auth.mfa_factors (user_id, created_at);
 
--- The session's authentication methods, one row each, as upstream's mfa_amr_claims. They describe
--- the session and go with it.
---
--- Unique per method, as upstream: without it, re-verifying a factor grows the claim into
--- ['password', 'totp', 'totp'].
+-- One history row per method and session, including repeated verifications.
 CREATE TABLE IF NOT EXISTS auth.mfa_amr_claims (
   id                     text PRIMARY KEY,
   session_id             uuid NOT NULL REFERENCES auth.sessions(id) ON DELETE CASCADE,

@@ -143,15 +143,20 @@ describe('parse failures', () => {
 describe('expression indexes', () => {
    test('trim is refused under the name the parser normalises it to', async () => {
       await assert.rejects(
-         () => translate("CREATE TABLE t (n text); CREATE INDEX i ON t ((trim(n)));"),
+         () => translate('CREATE TABLE t (n text); CREATE INDEX i ON t ((trim(n)));'),
          /Function call "btrim" not supported/,
       )
    })
 
    test('NULLIF survives, and so does CASE with an ELSE NULL', async () => {
-      assert.match(await translate("CREATE TABLE t (n text); CREATE INDEX i ON t ((nullif(n, '')));"), /NULLIF \(n, ''\)/)
       assert.match(
-         await translate('CREATE TABLE t (a int, n text); CREATE INDEX i ON t ((CASE WHEN a > 0 THEN n ELSE NULL END));'),
+         await translate("CREATE TABLE t (n text); CREATE INDEX i ON t ((nullif(n, '')));"),
+         /NULLIF \(n, ''\)/,
+      )
+      assert.match(
+         await translate(
+            'CREATE TABLE t (a int, n text); CREATE INDEX i ON t ((CASE WHEN a > 0 THEN n ELSE NULL END));',
+         ),
          /ELSE NULL/,
       )
    })

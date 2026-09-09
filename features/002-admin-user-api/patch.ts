@@ -1,34 +1,6 @@
-// FEAT-002 — the core admin users API: list, get, create and delete.
-//
-// Deliberately not billed as `supabase.auth.admin.*`, which also covers updateUserById, the MFA
-// admin routes and generate_link. Those are named as out of scope at the head of
-// src/server/server.ts rather than half-implemented.
-//
-// FEATURES.md marks this planned, effort M. The table, the repository query builders and the
-// response mapper are all there; what was missing was routes.
-//
-// `authRoutes` is a module variable whose name the minifier erased, recovered from the mounting call
-// where the path literal survived. The app builder is identified by the storage mount mask, since
-// `/auth/v1` also appears in the OAuth callback URL builder.
-//
-// Two anchors, because a soft delete has two halves and only one is a route:
-//
-//   createApp               the routes
-//   createSessionForUser    a soft-deleted user is refused a session
-//
-// The second is not tidiness: `deleted_at` occurs once in the published bundle, in the DDL creating
-// the column, so nothing honours it. One wrapper on the method every sign-in flow ends at; guarding
-// the flows themselves would cost five and miss the sixth.
-//
-// The soft delete follows GoTrue: the row and its id stay so references resolve, and the identifiers
-// are replaced with `base64url(sha256(id + value))` rather than kept. Keeping them, as an earlier
-// version did, leaves the address registered for ever — creating that user again answers
-// `email_exists` for somebody nobody can reach.
-//
-// This patch must apply on its own, so the MFA factor table it clears may not exist. Its presence is
-// asked with a harmless read *before* the transaction opens: the driver wraps a missing table into
-// `Failed to prepare statement` and loses the cause, so a query inside the transaction cannot be
-// told apart from a real failure and would roll the whole delete back.
+// FEAT-002 — list, get, create, and delete users through the admin API.
+// Adds routes before authRoutes is mounted and rejects deleted users at session creation.
+// The storage mount identifies createApp; /auth/v1 also occurs in the OAuth callback builder.
 import {
    argumentOfCall,
    functionWithText,

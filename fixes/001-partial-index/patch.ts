@@ -26,6 +26,8 @@ export const expectedDivergence = [
    'FIX-001 partial indexes keep their predicate > WHERE inside an index name is not mistaken for the filter',
    'FIX-001 partial indexes keep their predicate > a predicate differing in more than spacing is a change',
    'FIX-001 partial indexes keep their predicate > a plain index becomes partial, and back',
+   'FIX-001 partial indexes keep their predicate > a SQL comment is not mistaken for subtraction when comparing predicates',
+   'FIX-001 partial indexes keep their predicate > whitespace inside a quoted literal remains significant',
    // `the same address twice among live rows is still refused` is not declared either: a globally
    // unique index refuses that insert too, so both builds agree. It is the other half of the idiom —
    // the half that must keep working while the reusable half is fixed.

@@ -198,4 +198,38 @@ describe('FIX-001 partial indexes keep their predicate', () => {
       ).diff()) as { diff: { has_changes: boolean } }
       assert.equal(diff.has_changes, true)
    })
+
+   test('a SQL comment is not mistaken for subtraction when comparing predicates', async () => {
+      const table = 'CREATE TABLE t (a int);\n'
+      const { connection } = await migrate(table)
+      await connection.exec('CREATE UNIQUE INDEX i ON t(a) WHERE (a--1\n)>0')
+      await connection.exec('INSERT INTO t(a) VALUES (0)')
+
+      const desired = `${table}CREATE UNIQUE INDEX i ON t(a) WHERE (a - -1) > 0;`
+      const { diff } = await (await connection.createMigrator(desired)).diff()
+      assert.equal(diff.has_changes, true)
+      await (await connection.createMigrator(desired)).migrate()
+
+      await assert.rejects(() => connection.exec('INSERT INTO t(a) VALUES (0)'), /UNIQUE constraint failed/)
+   })
+
+   test('comments and whitespace between tokens do not change a predicate', async () => {
+      const table = 'CREATE TABLE t (a int, note text);\n'
+      const { connection } = await migrate(table)
+      await connection.exec("CREATE INDEX i ON t(a) WHERE a/* threshold */>0 AND note = '-- keep  spaces' -- end")
+
+      const desired = `${table}CREATE INDEX i ON t(a) WHERE a > 0 AND note = '-- keep  spaces';`
+      const { diff } = await (await connection.createMigrator(desired)).diff()
+      assert.equal(diff.has_changes, false)
+   })
+
+   test('whitespace inside a quoted literal remains significant', async () => {
+      const table = 'CREATE TABLE t (a int, note text);\n'
+      const { connection } = await migrate(table)
+      await connection.exec("CREATE INDEX i ON t(a) WHERE note = '-- keep  spaces'")
+
+      const desired = `${table}CREATE INDEX i ON t(a) WHERE note = '-- keep spaces';`
+      const { diff } = await (await connection.createMigrator(desired)).diff()
+      assert.equal(diff.has_changes, true)
+   })
 })

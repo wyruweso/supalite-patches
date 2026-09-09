@@ -83,12 +83,13 @@ These capabilities were listed as planned in the package's `FEATURES.md`. The ad
 does not include user updates, bans, link generation, or MFA admin routes. The TOTP implementation
 does not include unenrollment, QR generation, or phone factors.
 
-Two behaviors are worth naming, because they are security-relevant rather than optional:
-
 - FEAT-002's soft delete replaces the user's identifiers with a digest, as GoTrue does, so a deleted
   address does not stay registered. It keeps the row and its id.
-- FEAT-003 requires `aal2` to enroll or verify a further factor once one is verified. Without that
-  check, a session holding only the password can enroll a factor of its own and reach `aal2`.
+- FEAT-003 requires `aal2` to enroll or first verify an additional factor. Any already verified
+  factor can establish `aal2` during sign-in, including accounts with multiple factors.
+
+FEAT-003 upgrades existing SQLite MFA tables when `ensureSystemSchema()` runs. The upgrade retains
+enrolled factors, pending challenges, and sessions; it can be run repeatedly.
 
 ## Reviewing a patch
 
@@ -129,13 +130,13 @@ not establish that every other behavior is unchanged.
 
 ## Version compatibility
 
-| Package version | Status                                                                              |
-| --------------- | ----------------------------------------------------------------------------------- |
-| `0.9.0`         | Pinned dependency and baseline for the findings and tests                           |
-| `0.9.1-next.1`  | Also accepted by the build and installer                                            |
-| `0.9.1-next.2`  | Reviewed separately; not enabled in the build                                       |
-| `0.10.0`        | Current `latest`; reviewed separately; not enabled in the build                     |
-| `0.10.1-next.2` | Current `next`; reviewed separately; not enabled in the build                       |
+| Package version | Status                                                          |
+| --------------- | --------------------------------------------------------------- |
+| `0.9.0`         | Pinned dependency and baseline for the findings and tests       |
+| `0.9.1-next.1`  | Also accepted by the build and installer                        |
+| `0.9.1-next.2`  | Reviewed separately; not enabled in the build                   |
+| `0.10.0`        | Current `latest`; reviewed separately; not enabled in the build |
+| `0.10.1-next.2` | Current `next`; reviewed separately; not enabled in the build   |
 
 [apply.ts](apply.ts) defines the accepted versions and rejects others.
 

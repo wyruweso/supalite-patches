@@ -26,11 +26,7 @@ interface Planner {
    planOriginal(diff: { has_changes: boolean }, current: Schema, desired: Schema, options?: unknown): Plan
 }
 
-/**
- * The key indexes are matched by. Without the predicate, `email UNIQUE WHERE deleted_at IS NULL` and
- * a global `email UNIQUE` are the same index; with it compared as raw text, `a>0` and `a > 0` are
- * two, and a migration rebuilds the table to replace an index with itself.
- */
+/** Include the predicate without treating formatting changes as index changes. */
 export function makeIndexKey(index: IndexModel): string {
    const predicate = index.where ? normalisePredicate(index.where) : ''
    return `${index.table}:${index.name}:${index.unique}:${index.columns.join(',')}:${predicate}`
@@ -67,57 +63,10 @@ export function plan(
    }
 }
 
-/**
- * Whitespace outside quoted text carries no meaning, so `a>0` and `a > 0` are one predicate. Quoted
- * runs are copied verbatim — collapsing inside them would rewrite a literal.
- */
+/** Keep token boundaries: removing spaces must not turn `a - -1` into the comment in `a--1`. */
 function normalisePredicate(predicate: string): string {
-   let normalised = ''
-
-   for (let i = 0; i < predicate.length; i++) {
-      const char = predicate[i]
-
-      if (char === "'" || char === '"' || char === '`') {
-         const closing = closingQuote(predicate, i)
-         normalised += predicate.slice(i, closing + 1)
-         i = closing
-         continue
-      }
-      if (char === '[') {
-         const closing = predicate.indexOf(']', i + 1)
-         const end = closing < 0 ? predicate.length - 1 : closing
-         normalised += predicate.slice(i, end + 1)
-         i = end
-         continue
-      }
-      if (!WHITESPACE.test(char)) {
-         normalised += char
-         continue
-      }
-
-      // A run of whitespace separates two things only when both sides are word characters: `NOT NULL`
-      // is two words, `a > 0` is one expression however it is spaced.
-      let after = i
-      while (after < predicate.length && WHITESPACE.test(predicate[after])) after++
-      if (isWordCharacter(normalised[normalised.length - 1]) && isWordCharacter(predicate[after])) normalised += ' '
-      i = after - 1
-   }
-
-   return normalised
-}
-
-/** The closing quote of the run opened at `opening`, skipping the doubling SQLite escapes with. */
-function closingQuote(sql: string, opening: number): number {
-   const quote = sql[opening]
-   for (let i = opening + 1; i < sql.length; i++) {
-      if (sql[i] !== quote) continue
-      if (sql[i + 1] === quote) {
-         i++
-         continue
-      }
-      return i
-   }
-   return sql.length - 1
+   const parts = predicate.match(SQLITE_PREDICATE_PARTS) ?? []
+   return JSON.stringify(parts.filter((part) => !SQLITE_PREDICATE_SPACING.test(part)))
 }
 
 /**
@@ -144,11 +93,18 @@ function readIndexNameFromCreateSql(sql: string): string {
    return ''
 }
 
-// Declared once rather than inside the test below: the patcher moves top-level declarations into the
-// function it splices, so a literal here is built per call rather than per character.
-const WORD_CHARACTER = /[\p{L}\p{N}_$]/u
-const WHITESPACE = /\s/
+const SQLITE_PREDICATE_SPACING = /^(?:[ \t\r\n\f]|--|\/\*)/
 
-function isWordCharacter(char: string | undefined): boolean {
-   return char !== undefined && WORD_CHARACTER.test(char)
-}
+// Only SQLite predicate text: comments, quoted values, numbers, names, and operators.
+const SQLITE_PREDICATE_PARTS = new RegExp(
+   [
+      /[ \t\r\n\f]+|--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/.source,
+      /[xX]?'(?:''|[^'])*'/.source,
+      /"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]/.source,
+      /0[xX][\da-fA-F_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?[\d_]+)?/.source,
+      /[A-Za-z_$\u0080-\uFFFF][\w$\u0080-\uFFFF]*/.source,
+      /->>|->|<<|>>|<=|>=|==|!=|<>|\|\|/.source,
+      /[\s\S]/.source,
+   ].join('|'),
+   'g',
+)

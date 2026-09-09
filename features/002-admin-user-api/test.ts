@@ -545,13 +545,7 @@ describe('FEAT-002 admin user API', () => {
    // flag was accepted and dropped.
    test('phone_confirm marks the number confirmed', async () => {
       const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
-      const r = await req(
-         fresh.app,
-         'POST',
-         '/auth/v1/admin/users',
-         { phone: '+15550777', phone_confirm: true },
-         admin,
-      )
+      const r = await req(fresh.app, 'POST', '/auth/v1/admin/users', { phone: '+15550777', phone_confirm: true }, admin)
       assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 140))
 
       const [row] = await rows(fresh.connection, 'SELECT phone_confirmed_at FROM "auth.users"')

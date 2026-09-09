@@ -72,10 +72,10 @@ would be its own change.
 
 The inconsistency is visible side by side in one table:
 
-| violated constraint                                   | status    | body                                                                      |
-| ----------------------------------------------------- | --------- | ------------------------------------------------------------------------- |
-| named (`array_type`, generated for `int[]`)           | `400`     | `{"code":"23514","message":"check constraint \"array_type\" violated …"}` |
-| inline and unnamed (`CHECK (quantity > 0)`, date validity) | **`500`** | `{"code":"SUP","message":"Error: CHECK constraint failed: …"}`       |
+| violated constraint                                        | status    | body                                                                      |
+| ---------------------------------------------------------- | --------- | ------------------------------------------------------------------------- |
+| named (`array_type`, generated for `int[]`)                | `400`     | `{"code":"23514","message":"check constraint \"array_type\" violated …"}` |
+| inline and unnamed (`CHECK (quantity > 0)`, date validity) | **`500`** | `{"code":"SUP","message":"Error: CHECK constraint failed: …"}`            |
 
 Writing `-1` to a column declared `int CHECK (quantity > 0)`, or `'not-a-date'` to a `date` column,
 is a client error. Both are reported as a server fault, with the raw SQLite constraint text as the
@@ -149,7 +149,7 @@ of the JSON and has to parse them itself, and `row.ok === true` is never true.
 is translated and merged back into the introspection by `mergeDeparseMetadata`, behind this guard:
 
 ```js
-this.config.ddlDialect === "postgres" && e?.postprocess !== false && (r = this.mergeDeparseMetadata(r))
+this.config.ddlDialect === 'postgres' && e?.postprocess !== false && (r = this.mergeDeparseMetadata(r))
 ```
 
 `SqliteConnection`'s constructor never defaults `ddlDialect`, so for every connection created without
@@ -158,7 +158,7 @@ skipped with it. Two lines below the guard, the very same value is reported with
 branch lacks:
 
 ```js
-ddl_dialect: this.config.ddlDialect ?? "postgres"
+ddl_dialect: this.config.ddlDialect ?? 'postgres'
 ```
 
 So the introspection announces the dialect whose handling was just skipped. Nothing needs inferring;
@@ -226,13 +226,13 @@ The family is five statements across five node types, and only two of them annou
 type. The rest share theirs with every other kind of database object, so each has to be read by the
 object it names:
 
-| statement                   | node                    | recognised by                          |
-| --------------------------- | ----------------------- | -------------------------------------- |
-| `CREATE PUBLICATION`        | `CreatePublicationStmt` | the node type                          |
-| `ALTER PUBLICATION` ADD/SET/DROP | `AlterPublicationStmt` | the node type                     |
-| `DROP PUBLICATION`          | `DropStmt`              | `removeType: 'OBJECT_PUBLICATION'`     |
-| `ALTER PUBLICATION … RENAME TO` | `RenameStmt`        | `renameType: 'OBJECT_PUBLICATION'`     |
-| `ALTER PUBLICATION … OWNER TO`  | `AlterOwnerStmt`    | `objectType: 'OBJECT_PUBLICATION'`     |
+| statement                        | node                    | recognised by                      |
+| -------------------------------- | ----------------------- | ---------------------------------- |
+| `CREATE PUBLICATION`             | `CreatePublicationStmt` | the node type                      |
+| `ALTER PUBLICATION` ADD/SET/DROP | `AlterPublicationStmt`  | the node type                      |
+| `DROP PUBLICATION`               | `DropStmt`              | `removeType: 'OBJECT_PUBLICATION'` |
+| `ALTER PUBLICATION … RENAME TO`  | `RenameStmt`            | `renameType: 'OBJECT_PUBLICATION'` |
+| `ALTER PUBLICATION … OWNER TO`   | `AlterOwnerStmt`        | `objectType: 'OBJECT_PUBLICATION'` |
 
 The last two fail on the published build with `RenameStmt with renameType OBJECT_PUBLICATION is not
 supported in SQLite` and `Unsupported node type: AlterOwnerStmt`. It does not implement Realtime — SQLite has no logical
@@ -266,7 +266,7 @@ a row in `public.profiles` on sign-up, and the `updated_at` trigger. They break 
 migration reports success and the tables are there.
 
 **Order, not only presence.** Creating the triggers exposes a second problem that the empty database
-hid. SQLite drops a table's own triggers with the table, but a trigger on *another* table that
+hid. SQLite drops a table's own triggers with the table, but a trigger on _another_ table that
 mentions it survives — and the rebuild's `ALTER TABLE … RENAME` validates the whole schema and
 refuses:
 

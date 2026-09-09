@@ -39,31 +39,10 @@ const STEP_SECONDS = 30
 /** Clock skew allowance: neighbouring steps are accepted in both directions. */
 const SKEW_STEPS = 1
 const CHALLENGE_SECONDS = 300
-/**
- * Wrong codes allowed against one challenge before it is spent. Per-challenge hygiene, not a
- * brute-force control: nothing stops the caller raising a fresh challenge, and upstream rate-limits
- * the routes themselves, which is the control this does not have.
- */
+/** Attempts are limited per challenge; this does not rate-limit new challenges. */
 const MAX_ATTEMPTS = 5
 
-/**
- * Builds the app and mounts the routers.
- *
- * FEATURES.md marks MFA/TOTP planned, suggesting otplib. No library was needed: TOTP is an HMAC-SHA1
- * of a time step, and `crypto.subtle` exists in every runtime this package targets.
- *
- * What this covers, and what it does not:
- *
- *   enroll / challenge / verify        yes
- *   factors on the user object         yes — that is where supabase-js reads them from
- *   session elevated to aal2           yes, and the claim survives a refresh
- *   other sessions ended on verify     yes
- *   anonymous users refused            yes
- *   `qr_code`                          NO — see the enrol route
- *   unenroll, phone factors            no
- *   one challenge per factor           a simplification; upstream stores challenges separately
- *   the secret at rest                 plaintext in the local SQLite file; GoTrue can encrypt it
- */
+/** Register the MFA routes before the original app builder mounts authRoutes. */
 export function createApp(options: unknown, extra: unknown): unknown {
    registerMfaRoutes()
    return original(options, extra)
@@ -74,11 +53,7 @@ function registerMfaRoutes(): void {
    if (authRoutes.mfaRoutesRegistered) return
    authRoutes.mfaRoutesRegistered = true
 
-   /**
-    * An anonymous user may not enrol a second factor — there is no first one to add it to, and
-    * upstream guards every one of these routes. The check reads the row rather than the token, so it
-    * holds whether or not the anonymous sign-in patch is applied.
-    */
+   /** Check the stored user so this guard also works without the anonymous sign-in patch. */
    const requireNotAnonymous = async (c: HonoContext): Promise<Response | UserRow> => {
       const user = await c.var.authService.repo.findUserById(c.get('userId') as string)
       if (!user) return notFound(c)
@@ -96,10 +71,7 @@ function registerMfaRoutes(): void {
       const user = await requireNotAnonymous(c)
       if (user instanceof Response) return user
 
-      // A password-only session must not be able to add a factor to an account that already has one:
-      // it could then verify a factor of its own making and reach aal2 without the existing one ever
-      // being used. Upstream requires aal2 here for the same reason.
-      const insufficient = await refuseUnlessAssured(c, user.id, null)
+      const insufficient = await requireMfaForAdditionalFactor(c, user.id)
       if (insufficient) return insufficient
 
       const body = ((await c.req.json().catch(() => ({}))) ?? {}) as {
@@ -116,8 +88,7 @@ function registerMfaRoutes(): void {
       const secret = randomBase32Secret()
       const friendlyName = body.friendly_name ?? 'TOTP'
 
-      // The unique index carries the rule, the only place free of a race between asking and
-      // inserting. It matches on an expression, so the name is stored as written.
+      // Enforce name uniqueness in the database while retaining the original spelling.
       const now = new Date().toISOString()
       try {
          await connection.exec(
@@ -143,19 +114,14 @@ function registerMfaRoutes(): void {
          )
       }
 
-      // The authenticator app shows `issuer` as the provider and the label as the identity within
-      // it. The friendly name names the factor, not the account, so it is not the label. supabase-js
-      // passes the issuer through from enroll().
+      // The label identifies the account; friendly_name identifies this particular factor.
       const issuer = body.issuer ?? 'Supabase'
       const label = typeof user.email === 'string' && user.email ? user.email : user.id
       const uri =
          `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(label)}` +
          `?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=${STEP_SECONDS}`
 
-      // No `qr_code`. GoTrue returns an SVG there, which would mean writing a QR encoder — a patch
-      // is spliced into an already-built bundle and cannot pull in a dependency. Better absent than
-      // wrong: a client doing `img.src = 'data:image/svg+xml,' + qr_code` fails silently on a URI.
-      // The `uri` is here, and every QR library renders it in one call.
+      // Return the otpauth URI for client-side QR generation; qr_code requires an SVG encoder.
       return c.json({ id, type: 'totp', friendly_name: friendlyName, totp: { secret, uri } }, 200)
    })
 
@@ -179,20 +145,7 @@ function registerMfaRoutes(): void {
       return c.json({ id, type: 'totp', factor_id: factor.id, expires_at: expiresAt }, 200)
    })
 
-   /**
-    * Verifying a factor, which raises the caller's own session.
-    *
-    * The invariants, each held by one thing rather than by the shape of the code:
-    *
-    *   a further factor needs the existing one   refuseUnlessAssured, on auth.sessions.aal
-    *   one challenge, one verification           the challenge id is in the UPDATE's WHERE
-    *   one OTP, one use                          so is the time step it was computed for
-    *   sessions that passed MFA survive          only sessions below aal2 are ended
-    *
-    * The checks that answer with a status — an unknown factor, an expired challenge, a wrong code —
-    * are outside the transaction, so a wrong answer there costs nothing. Everything that changes
-    * state is inside it, and the token is minted after the commit.
-    */
+   /** Consume the challenge and OTP step atomically, then elevate the existing session. */
    authRoutes.post('/factors/:factorId/verify', async (c) => {
       const user = await requireNotAnonymous(c)
       if (user instanceof Response) return user
@@ -201,12 +154,11 @@ function registerMfaRoutes(): void {
       const factor = await findFactor(connection, c.req.param('factorId'), user.id)
       if (!factor) return notFound(c)
 
-      // Verifying a factor while a DIFFERENT one is already verified is the same escalation as
-      // enrolling: it must come from a session that has already passed the existing factor. The
-      // ordinary step-up login — one verified factor, proving it from an aal1 session — is untouched,
-      // and so is re-verifying this same factor.
-      const insufficient = await refuseUnlessAssured(c, user.id, factor.id)
-      if (insufficient) return insufficient
+      // Existing factors establish AAL2 at sign-in; confirming an additional factor requires it.
+      if (factor.status !== 'verified') {
+         const insufficient = await requireMfaForAdditionalFactor(c, user.id)
+         if (insufficient) return insufficient
+      }
 
       const body = ((await c.req.json().catch(() => ({}))) ?? {}) as { code?: string; challenge_id?: string }
 
@@ -226,15 +178,8 @@ function registerMfaRoutes(): void {
       const sessionId = (c.get('jwt') as { session_id?: string })?.session_id
       if (!sessionId) return c.json({ code: 401, error_code: 'no_authorization', msg: 'No session' }, 401)
 
-      // The caller's own session is elevated rather than a new one issued. `auth.sessions` already
-      // carries `aal` and `factor_id`, so the level lives in the database and every later token for
-      // this session is minted at it. A fresh session would change `session_id` under the caller and
-      // terminate the very token they are making this request with.
-      //
-      // Everything that changes state is in one transaction, and the challenge is consumed by the
-      // first statement in it — matched on its id and on the time step, so two requests carrying the
-      // same challenge or the same code cannot both succeed. The token is minted after the commit,
-      // where a failure is harmless.
+      // Consume the challenge, elevate this session, and record the method in one transaction.
+      // Issue the token after commit.
       let consumed = true
       await c.var.authService.repo.transaction(async (tx) => {
          const now = new Date().toISOString()
@@ -244,8 +189,7 @@ function registerMfaRoutes(): void {
 
          await tx.update('sessions').set({ aal: 'aal2', factor_id: factor.id }).where('id', '=', sessionId).execute()
 
-         // Appended, not replaced: `amr` is the history of both the password and this factor. Once
-         // per session, or re-verifying would read ['password', 'totp', 'totp'].
+         // Keep one history entry per authentication method and session.
          await tx
             .insertInto('mfa_amr_claims')
             .values({
@@ -260,9 +204,7 @@ function registerMfaRoutes(): void {
             )
             .execute()
 
-         // The user's weaker sessions end here: established at aal1, they would let an older token
-         // walk around the second factor. A session that has already passed MFA is left alone —
-         // ending it would log the user's other devices out for authenticating properly.
+         // Preserve sessions that already passed MFA; revoke the other AAL1 sessions.
          const others = (await tx
             .table('sessions')
             .select(['id', 'aal'])
@@ -277,8 +219,7 @@ function registerMfaRoutes(): void {
          }
       })
 
-      // Nothing was consumed: another request had this challenge, or this code was already used for
-      // its time step. Which one is a question for the row, asked once, outside the transaction.
+      // Distinguish a consumed challenge from an OTP step that was already used.
       if (!consumed) {
          const current = await findFactor(connection, factor.id, user.id)
          return current?.challenge_id === factor.challenge_id
@@ -286,8 +227,7 @@ function registerMfaRoutes(): void {
             : c.json({ code: 404, error_code: 'mfa_challenge_not_found', msg: 'Challenge not found' }, 404)
       }
 
-      // A fresh pair for that same session, through the library's refresh path, so the wrapper in
-      // src/auth/session.ts stamps it from the row just raised to aal2.
+      // Use the existing refresh path to issue tokens carrying the updated session claims.
       const held = await connection.exec(
          'SELECT token FROM "auth.refresh_tokens" WHERE session_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1',
          sessionId,
@@ -302,10 +242,7 @@ function registerMfaRoutes(): void {
    })
 }
 
-/**
- * A unique-index violation, from anywhere in the cause chain: the driver wraps the SQLite error, so
- * the outer message says only "Failed to prepare statement".
- */
+/** The SQLite constraint error may be nested in the driver's cause chain. */
 function isUniqueViolation(error: unknown): boolean {
    for (let at = error as { message?: string; cause?: unknown } | undefined; at; at = at.cause as typeof at) {
       if (/UNIQUE constraint failed/i.test(String(at.message ?? at))) return true
@@ -317,25 +254,14 @@ function isUniqueViolation(error: unknown): boolean {
 const notFound = (c: HonoContext) =>
    c.json({ code: 404, error_code: 'mfa_factor_not_found', msg: 'Factor not found' }, 404)
 
-/**
- * Refuses unless the caller's session has already passed MFA, when the account has a verified factor
- * other than `exceptFactorId`. Read from `auth.sessions`, not from the token: the level is a fact
- * about the session, and a token minted before this feature existed carries no claim at all.
- *
- * `null` when the request may proceed.
- */
-async function refuseUnlessAssured(
-   c: HonoContext,
-   userId: string,
-   exceptFactorId: string | null,
-): Promise<Response | null> {
+/** Adding a factor requires AAL2 when the account already has a verified factor. */
+async function requireMfaForAdditionalFactor(c: HonoContext, userId: string): Promise<Response | null> {
    const connection = connectionOf(c)
    const verified = await connection.exec(
-      `SELECT id FROM "auth.mfa_factors" WHERE user_id = ? AND status = 'verified'`,
+      `SELECT id FROM "auth.mfa_factors" WHERE user_id = ? AND status = 'verified' LIMIT 1`,
       userId,
    )
-   const others = (verified.rows ?? []).filter((row) => row.id !== exceptFactorId)
-   if (others.length === 0) return null
+   if (!verified.rows?.length) return null
 
    const sessionId = (c.get('jwt') as { session_id?: string })?.session_id
    const session = sessionId
@@ -353,13 +279,7 @@ async function refuseUnlessAssured(
    )
 }
 
-/**
- * Marks the factor verified and spends both the challenge and the time step, in one statement.
- *
- * The row is matched on the challenge it still holds and on a step it has not accepted before, so of
- * two requests carrying the same challenge — or the same code through two challenges — exactly one
- * updates a row. `false` means somebody else got there first.
- */
+/** Match both challenge id and unused time step so concurrent requests cannot consume either twice. */
 async function consumeChallenge(
    tx: any,
    factorId: string,
@@ -392,12 +312,7 @@ function updatedRows(result: unknown): number {
    return Number((first as { numUpdatedRows?: unknown })?.numUpdatedRows ?? 0)
 }
 
-/**
- * Counts a wrong code against the challenge it was offered for, in SQL rather than by reading and
- * writing back — concurrent attempts would otherwise all store the same 1. The challenge is spent
- * once the count reaches the limit; the factor is left alone, since a wrong code is usually a typo
- * or a drifted clock and locking a factor needs an unlock route this feature does not have.
- */
+/** Increment in SQL to preserve concurrent attempts. Invalidate only the exhausted challenge. */
 async function recordFailedAttempt(connection: Connection, factorId: string, challengeId: string): Promise<void> {
    await connection.exec(
       'UPDATE "auth.mfa_factors" SET challenge_attempts = challenge_attempts + 1' +
@@ -419,10 +334,9 @@ async function findFactor(connection: Connection, id: string, userId: string) {
    return (result.rows ?? [])[0] ?? null
 }
 
-
 // --- TOTP ----------------------------------------------------------------------------------------
 //
-// RFC 6238 in thirty lines: the code is an HMAC-SHA1 of the time step, truncated by the RFC 4226 rule.
+// TOTP (RFC 6238), with dynamic truncation from RFC 4226.
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
 
@@ -470,14 +384,7 @@ async function codeForStep(secret: string, step: number): Promise<string> {
    return String(binary % 1000000).padStart(6, '0')
 }
 
-/**
- * Neighbouring steps are accepted too: clocks drift between a code being read off a phone and
- * reaching the server, and without the allowance a user near a boundary could never sign in.
- */
-/**
- * The time step this code is the OTP for, or null. The step rather than a boolean, because an OTP has
- * to be usable once and the step is what identifies it.
- */
+/** Return the matching step within the clock-skew window so verification can reject its reuse. */
 async function matchedStep(secret: string, code: string): Promise<number | null> {
    const cleaned = code.replace(/\s+/g, '')
    if (!/^\d{6}$/.test(cleaned)) return null

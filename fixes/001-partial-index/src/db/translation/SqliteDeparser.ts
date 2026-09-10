@@ -1,14 +1,6 @@
 import type { Deparser, DeparseContext, IndexStmtNode } from '../../../../../lib/pg-ast.ts'
 
-/**
- * `CREATE INDEX` → SQLite.
- *
- * The method assembled the statement from `unique`, `idxname`, `relation` and `indexParams` and never
- * looked at `node.whereClause`, which the parser does populate.
- *
- * A wrapper, since the whole defect is one missing suffix. Rebuilding the statement would mean owning
- * `IF NOT EXISTS`, the quoting, the relation and the index elements for ever after.
- */
+/** Append the missing WHERE clause; keep the original quoting and index options. */
 export function IndexStmt(this: Deparser, node: IndexStmtNode, context: DeparseContext): string {
    const sql = this.IndexStmtOriginal(node, context)
    if (!node.whereClause) return sql

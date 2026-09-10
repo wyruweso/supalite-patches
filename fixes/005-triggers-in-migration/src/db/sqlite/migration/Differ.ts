@@ -44,9 +44,7 @@ const DROP_TRIGGER = 'drop_trigger'
 /** The steps a rebuild is made of; the presence of either means tables are being replaced. */
 const REBUILD_STEPS = ['drop_table', 'rename_table']
 
-/**
- * The diff had no `triggers` key at all, so a trigger was never a change to plan for.
- */
+/** Include standalone trigger changes in the schema diff. */
 export function diff(this: Differ, current: Schema, desired: Schema): SchemaDiff {
    const result = this.diffOriginal(current, desired)
 
@@ -71,17 +69,8 @@ export function diff(this: Differ, current: Schema, desired: Schema): SchemaDiff
 }
 
 /**
- * Trigger steps, placed around the rest of the plan rather than appended to it.
- *
- * SQLite drops a table's own triggers with the table, but a trigger on another table that mentions
- * it survives — and the next `ALTER TABLE` validates the whole schema, finds the dangling reference
- * and fails the migration:
- *
- *    error in trigger on_src_insert: no such table: main.dst
- *
- * So whenever tables are rebuilt, every trigger is dropped before the rebuild and every desired one
- * recreated after it, and the original's own recreation steps are dropped to avoid doing it twice.
- * More work than the minimum, and the minimum is a dependency graph over trigger bodies.
+ * Triggers on other tables can retain references to a dropped table and block its rename.
+ * Drop all triggers before a rebuild, then recreate the desired set without duplicate steps.
  */
 export function plan(this: Planner, diff: SchemaDiff, current: Schema, desired: Schema, options?: unknown): Plan {
    const originalPlan = this.planOriginal(diff, current, desired, options)
@@ -150,10 +139,7 @@ function isTriggerCreation(step: PlanStep): boolean {
    return step.type === CREATE_TRIGGER || /^\s*CREATE\s+TRIGGER/i.test(step.sql)
 }
 
-/**
- * The trigger name out of `CREATE TRIGGER [IF NOT EXISTS] name …`, read rather than matched: an
- * unquoted name ends at whitespace, and a quoted one may contain a doubled quote.
- */
+/** Read an optionally quoted trigger name, including doubled quotes. */
 function triggerNameOf(sql: string): string {
    const rest = sql.replace(/^\s*CREATE\s+TRIGGER\s+(IF\s+NOT\s+EXISTS\s+)?/i, '')
    if (rest[0] !== '"') return rest.split(/[\s(]/)[0] ?? ''
@@ -176,11 +162,8 @@ function triggerNameOf(sql: string): string {
 }
 
 /**
- * A statement, less the terminator that is not part of it. The comparison is exact, deliberately:
- * collapsing whitespace would equate `VALUES ('a  b')` with `VALUES ('a b')`, so a trigger differing
- * only inside a string literal would never be recreated. Exact works because both sides come from
- * the same generator, and the failure modes are asymmetric — too strict recreates a trigger
- * needlessly, too loose leaves the old one in place for ever.
+ * Remove the trailing terminator only. Whitespace inside SQL literals is data.
+ * Exact comparison may rebuild unnecessarily; a looser one could miss a changed trigger.
  */
 function statementOf(sql: string): string {
    return (sql ?? '').trim().replace(/;+$/, '').trim()

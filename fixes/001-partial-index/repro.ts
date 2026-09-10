@@ -1,10 +1,5 @@
-// FIX-001 — a partial index silently loses its WHERE clause.  FINDINGS #1
-//
-// For a UNIQUE index the dropped predicate changes what the database accepts, in the direction that
-// breaks the standard soft-delete idiom.
-//
-//   node repro.ts 001          on the published bundle, so the defect shows
-//   npm run install:patches    then run it again
+// A partial UNIQUE index must allow reuse of a soft-deleted row's address.
+// Run: npm run repro -- partial-index
 import { newApp, post, type LiteApp, type LiteConnection } from '../../test/harness.ts'
 
 // The library logs every error it handles, stack trace included, which would bury a short report.

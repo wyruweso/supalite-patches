@@ -1,12 +1,4 @@
-// FIX-001 — a partial index loses its predicate.  FINDINGS #1
-//
-// The predicate has to survive four representations, and skipping any one brings the defect back
-// whole:
-//
-//   Postgres AST → SQLite DDL    IndexStmt          emits WHERE
-//   SQLite DDL   → schema model  introspect         reads WHERE back
-//   model        → comparison    makeIndexKey       notices a changed WHERE
-//   model        → SQLite DDL    MigrationPlanner   emits WHERE again
+// FIX-001: preserve WHERE through translation, introspection, comparison, and planning.
 import { methodNamed, replaceFunction, wrapMethod } from '../../lib/patcher.ts'
 
 export const id = 'FIX-001'
@@ -29,13 +21,8 @@ export const expectedDivergence = [
    'FIX-001 partial indexes keep their predicate > a plain index becomes partial, and back',
    'FIX-001 partial indexes keep their predicate > a SQL comment is not mistaken for subtraction when comparing predicates',
    'FIX-001 partial indexes keep their predicate > whitespace inside a quoted literal remains significant',
-   // `the same address twice among live rows is still refused` is not declared either: a globally
-   // unique index refuses that insert too, so both builds agree. It is the other half of the idiom —
-   // the half that must keep working while the reusable half is fixed.
-   //
-   // `the same predicate spaced differently is not a change` is not declared: with no predicate in
-   // the model the published build agrees nothing changed, for the wrong reason. It guards the
-   // comparison against becoming too literal.
+   // Duplicate live rows and formatting-only changes already behave correctly on both builds.
+   // Their tests stay outside expectedDivergence.
 ]
 
 export function apply(source: string): string {

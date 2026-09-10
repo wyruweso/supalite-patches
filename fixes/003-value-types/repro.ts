@@ -1,10 +1,5 @@
-// FIX-003 — values arrive in the wrong types.  FINDINGS #5, #6
-//
-// The round trip is lossless either way; what breaks is code written against hosted Supabase, and
-// it breaks at the point of use (`row.tags.map(...)`) rather than at the query.
-//
-//   node repro.ts 003          on the published bundle, so the defect shows
-//   npm run install:patches    then run it again
+// Arrays, objects, and booleans should arrive as their declared types.
+// Run: npm run repro -- value-types
 import { newApp, get, post, type LiteApp, type LiteConnection } from '../../test/harness.ts'
 
 // The library logs every error it handles, stack trace included, which would bury a short report.

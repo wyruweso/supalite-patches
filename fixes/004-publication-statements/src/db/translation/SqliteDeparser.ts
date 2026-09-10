@@ -3,12 +3,8 @@ interface Deparser {
 }
 
 /**
- * The deparser's dispatch by node type. Publications are Postgres logical replication, which SQLite
- * has no equivalent for, so the statements are dropped as `GRANT` and `COMMENT ON` already are.
- *
- * Filtering on the AST rather than the text means the word `PUBLICATION` inside a string or an
- * identifier cannot be mistaken for one of these statements, and a malformed one is still refused by
- * the parser rather than quietly ignored.
+ * Omit publication AST nodes, which have no SQLite equivalent.
+ * Parsing still rejects malformed SQL and distinguishes statements from quoted text.
  */
 export function visit(this: Deparser, node: unknown, context: unknown): string {
    if (isPublicationStatement(node)) return ''

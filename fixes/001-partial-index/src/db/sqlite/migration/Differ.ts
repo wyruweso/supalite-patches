@@ -32,11 +32,7 @@ export function makeIndexKey(index: IndexModel): string {
    return `${index.table}:${index.name}:${index.unique}:${index.columns.join(',')}:${predicate}`
 }
 
-/**
- * `CREATE INDEX` is assembled in three branches — creating, altering and rebuilding a table — all of
- * which produce an `add_index` step passing through here, so appending the predicate to the finished
- * statement keeps the change in one place instead of three.
- */
+/** All index creation paths emit add_index steps; append their predicates here. */
 export function plan(
    this: Planner,
    diff: { has_changes: boolean },
@@ -69,10 +65,7 @@ function normalisePredicate(predicate: string): string {
    return JSON.stringify(parts.filter((part) => !SQLITE_PREDICATE_SPACING.test(part)))
 }
 
-/**
- * The index name out of a generated `CREATE [UNIQUE] INDEX "name" …`, read rather than matched: a
- * quote inside an identifier is written by doubling it, and `"([^"]+)"` stops at the first half.
- */
+/** Read the generated index name, unescaping doubled quotes inside it. */
 function readIndexNameFromCreateSql(sql: string): string {
    const opening = sql.indexOf('"')
    if (opening < 0) return ''

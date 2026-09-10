@@ -81,9 +81,7 @@ describe('FEAT-001 anonymous sign-in', () => {
       assert.equal(claims.sub, session.user.id)
    })
 
-   // On every token, not only anonymous ones. Upstream's claim has no `omitempty`, and the
-   // documented policy `(auth.jwt() ->> 'is_anonymous')::boolean is false` reads an absent claim as
-   // NULL — so a policy meant to admit ordinary users would admit nobody.
+   // Ordinary tokens need is_anonymous=false: a missing claim evaluates to NULL in policy checks.
    test('an ordinary session carries is_anonymous=false', async () => {
       const { app }: { app: LiteApp } = await newAnonApp()
       const session = (await post(app, '/auth/v1/signup', { email: 'a@b.co', password: 'password123' })).body
@@ -106,23 +104,8 @@ describe('FEAT-001 anonymous sign-in', () => {
       assert.equal(r.body.error_code, 'anonymous_provider_disabled')
    })
 
-   /**
-    * The documented way out of an anonymous account: updateUser with an address, then verify it.
-    *
-    * Almost none of this is the patch's. `completeVerifyOtp` predates anonymous users, but already
-    * applies the pending address, creates and verifies the email identity, rebuilds the provider
-    * metadata and reloads both before minting the session:
-    *
-    *   the library already does      claims the address, creates the identity, marks it verified,
-    *                                 rebuilds app_metadata.providers, reloads both
-    *   FEAT-001 adds                 is_anonymous false, and the claim on the token that follows
-    *
-    * The library's half is asserted too, deliberately: it is why the patch does not repeat it, so if
-    * it ever stops this test says so rather than a user finding a converted account with no identity.
-    *
-    * Verified through POST rather than the emailed link, which answers 303 with its tokens in a
-    * fragment and so has no body to assert against. Same token, same path.
-    */
+   // The library verifies the address and identity; FEAT-001 clears the anonymous flag.
+   // POST verification returns tokens in JSON, making the result easier to assert than a redirect.
    test('claiming an address makes an anonymous user permanent', async () => {
       const driver = new lite.InMemoryEmailDriver({})
       const { app, connection }: { app: LiteApp; connection: LiteConnection } = await newRawApp({
@@ -187,9 +170,7 @@ describe('FEAT-001 anonymous sign-in', () => {
       assert.equal(claimsOf(refreshed.body.access_token).is_anonymous, false)
    })
 
-   // The user is permanent and the session refreshes like any other. A right creation path with a
-   // wrong reload path shows up here: the row comes back from SQLite as 0/1, and losing that would
-   // flip the user to non-anonymous on the second token.
+   // Refreshing reloads SQLite's numeric flag; it must retain the anonymous claim.
    test('the session refreshes, and the user is still anonymous', async () => {
       const { app }: { app: LiteApp } = await newAnonApp()
       const session = (await anon(app)).body
@@ -256,14 +237,7 @@ describe('FEAT-001 anonymous sign-in', () => {
       assert.equal(user.user_metadata.cart, 'before sign-in')
    })
 
-   /**
-    * Both halves of re-signing a token, asserted on an ordinary user: the claim is stamped on every
-    * token, so anything the re-signing gets wrong is wrong for everybody.
-    *
-    * `atob` returns one character per byte, so the UTF-8 those bytes spell has to be decoded before
-    * the claims are parsed — otherwise the address is re-signed mangled, with a valid signature over
-    * the wrong data, while the user object still reads correctly.
-    */
+   // Re-signing must decode UTF-8, or it signs corrupted non-ASCII claims.
    test('a non-ASCII address survives being re-signed', async () => {
       const { app }: { app: LiteApp } = await newAnonApp()
       const address = 'михайло@example.test'
@@ -278,11 +252,7 @@ describe('FEAT-001 anonymous sign-in', () => {
       assert.equal(claimsOf(refreshed.body.access_token).email, address)
    })
 
-   /**
-    * The library hangs `session_id` and `user_id` off the session non-enumerably and reads them back
-    * for these headers, so replacing the token by spreading the session drops both — invisibly,
-    * because signing in still works.
-    */
+   // Spreading the session would lose non-enumerable session_id/user_id used for response headers.
    test('the session headers survive being re-signed', async () => {
       const { app }: { app: LiteApp } = await newAnonApp()
       const session = await post(app, '/auth/v1/signup', { email: 'headers@b.co', password: 'password123' })

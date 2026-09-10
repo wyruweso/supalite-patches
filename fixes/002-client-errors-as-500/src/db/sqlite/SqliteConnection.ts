@@ -2,10 +2,7 @@ interface SqliteConnection {
    normalizeDbErrorOriginal(err: unknown): unknown
 }
 
-/**
- * SQLite's extended result code for each constraint kind, and the SQLSTATE Postgres raises for the
- * same refusal. The numbers are part of SQLite's compatibility contract, so they can be matched on.
- */
+/** SQLite extended constraint codes mapped to their PostgreSQL SQLSTATE equivalents. */
 const SQLSTATE_BY_ERRCODE: Record<number, string> = {
    275: '23514', // SQLITE_CONSTRAINT_CHECK
    787: '23503', // SQLITE_CONSTRAINT_FOREIGNKEY
@@ -14,20 +11,10 @@ const SQLSTATE_BY_ERRCODE: Record<number, string> = {
    2067: '23505', // SQLITE_CONSTRAINT_UNIQUE
 }
 
-// SQLITE_CONSTRAINT_DATATYPE (3091) is deliberately absent. It is raised both for a value of the
-// wrong type for its column, where 400 would be right, and for a type the library does not serialise
-// at all — `bytea`, where Postgres accepts `\x48656c6c6f` and answers 201, so neither 400 nor the
-// present 500 is the correct answer. Mapping it would dress a missing conversion as bad input, and
-// telling the two apart here would mean reading the message, which is what this patch exists to stop.
+// 3091 (DATATYPE) also covers missing bytea conversion, where valid input should succeed.
+// Leave it unmapped rather than report every conversion failure as bad input.
 
-/**
- * A driver error to an SQLSTATE, which is what the whole error ladder above dispatches on.
- *
- * The original recognises better-sqlite3's shape, where the constraint is a string in `code`
- * (`SQLITE_CONSTRAINT_UNIQUE` and so on). This package's driver is `node:sqlite`, which puts
- * `ERR_SQLITE_ERROR` there and the constraint in a numeric `errcode`, so no branch matched and every
- * constraint violation arrived at the mapper uncoded — and left it as a `500 SUP`.
- */
+/** Read node:sqlite's numeric errcode before delegating to the original error normalizer. */
 export function normalizeDbError(this: SqliteConnection, err: unknown): unknown {
    const normalised = this.normalizeDbErrorOriginal(err)
 

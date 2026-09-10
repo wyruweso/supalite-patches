@@ -1,10 +1,5 @@
-// FIX-002 — client errors reported as server faults.  FINDINGS #2, #3, #4
-//
-// Refusals that are all the caller's fault, all answered `500 SUP` with a stringified Error — the
-// fingerprint of an exception that escaped rather than an error raised deliberately.
-//
-//   node repro.ts 002          on the published bundle, so the defect shows
-//   npm run install:patches    then run it again
+// Client errors should return 4xx instead of 500 SUP.
+// Run: npm run repro -- client-errors-as-500
 import { newApp, post, pgrstCode, type LiteApp, type LiteConnection } from '../../test/harness.ts'
 
 // The library logs every error it handles, stack trace included, which would bury a short report.
@@ -13,10 +8,7 @@ const show = (label: string, value: unknown) => console.log(`  ${label.padEnd(34
 
 console.log('\nFIX-002 — client errors come back as server faults\n')
 
-// --- #2 — an RLS refusal with no matching policy --------------------------------------------------
-//
-// RLS denies per command. A table with only a FOR SELECT policy correctly refuses an insert and the
-// row is not written; only the status is wrong. The WITH CHECK path beside it converts properly.
+// A SELECT policy permits no inserts; the refusal is correct, but its status is wrong.
 const rls: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
 await (
    await rls.connection.createMigrator(`CREATE TABLE notes (id int primary key, body text);
@@ -70,9 +62,7 @@ for (const [label, table, body, status, code] of [
    wrong ||= !asExpected
 }
 
-// #4 is not a missing branch: the SQLSTATE branches are right, but the step before them never fires
-// — normalizeDbError matches `err.code === 'SQLITE_CONSTRAINT_*'`, the better-sqlite3 shape, while
-// the package's own driver is node:sqlite.
+// node:sqlite reports constraints in numeric errcode; the original reads better-sqlite3's code.
 console.log()
 const connection = db.connection as unknown as { normalizeDbError(e: unknown): { code?: string } }
 try {

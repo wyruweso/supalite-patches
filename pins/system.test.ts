@@ -33,9 +33,7 @@ describe('_system', () => {
       assert.equal(r.body.auth.enable_manual_linking, false)
    })
 
-   // A table is located by its DDL rather than its reported name: whether the auth table comes back
-   // as `auth.users` or as `users` with `schema: 'auth'` depends on whether the Postgres metadata was
-   // merged in, which is FIX-003's subject and is asserted there.
+   // Find the table by DDL: FIX-003 changes whether auth.users is reported with a separate schema.
    const authUsers = (body: any) => body.tables.find((t: any) => String(t.sql).includes('"auth.users"'))
 
    test('introspect reports the tables with their SQLite DDL', async () => {

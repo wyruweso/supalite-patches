@@ -1,15 +1,5 @@
-// FIX-003 — values arrive in the wrong types.  FINDINGS #5
-//
-// `jsonb` and arrays come back over REST as the characters of their JSON and `boolean` as 0/1, so
-// `row.ok === true` is never true and `row.tags.map(...)` throws.
-//
-// The declared Postgres types are not lost. They are collected during translation and merged back
-// into the introspection — but only when `config.ddlDialect === 'postgres'`, and the constructor
-// never defaults it, so for every connection built without one the merge is skipped and the row
-// deserialiser is skipped with it. Two lines below the merge, the same field is reported as
-// `ddl_dialect: this.config.ddlDialect ?? 'postgres'`.
-//
-// Upstream fixed exactly this in 0.9.1-next.2 by defaulting the field where the config is built.
+// FIX-003: default ddlDialect to postgres so metadata merging and deserialization run.
+// Fixed upstream in 0.9.1-next.2.
 import { methodNamed, wrapMethod } from '../../lib/patcher.ts'
 
 export const id = 'FIX-003'
@@ -25,9 +15,7 @@ export const expectedDivergence = [
    'FIX-003 values come back in their Postgres types > an integer column stays an integer',
    'FIX-003 values come back in their Postgres types > an integer column stays an integer > beside a boolean whose name ends with its own',
    'FIX-003 values come back in their Postgres types > introspection reports a table under its own schema again',
-   // The other three `an integer column stays an integer` cases are not declared: the published
-   // build leaves those columns alone too, having no types to apply at all. They are regressions
-   // against inferring a type from the schema text, which is what this patch replaced.
+   // Unchanged integer cases guard against inferring types from neighboring CHECK expressions.
 ]
 
 export function apply(source: string): string {

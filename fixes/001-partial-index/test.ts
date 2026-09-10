@@ -124,10 +124,7 @@ describe('FIX-001 partial indexes keep their predicate', () => {
       assert.match(await indexSql(connection, 'notes_body'), /WHERE\s+body IS NOT NULL/)
    })
 
-   // Reading the predicate back means telling the filter's WHERE apart from any other, and
-   // sqlite_schema keeps the statement roughly as written. These go in as raw SQL because the
-   // translator's quoting cannot produce them — and the reader still meets them in databases it did
-   // not write.
+   // Use raw SQL to exercise quoted names the translator cannot produce.
    test('a WHERE inside the statement is not mistaken for the filter', async () => {
       const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
       await connection.exec('CREATE TABLE t (a int, note text)')
@@ -173,9 +170,7 @@ describe('FIX-001 partial indexes keep their predicate', () => {
       assert.equal(found.get('індексWHERE2'), 'a > 0')
    })
 
-   // Both sides normally reach the model through the same translator, which spaces them identically.
-   // An index created directly does not, and whitespace is not a difference worth rebuilding a table
-   // for. Written as raw SQL because that is the only way to reach the unnormalised path.
+   // Raw SQL preserves spacing that the translator would normalize.
    test('the same predicate spaced differently is not a change', async () => {
       const table = 'CREATE TABLE t (a int, note text);\n'
       const { connection } = await migrate(table)

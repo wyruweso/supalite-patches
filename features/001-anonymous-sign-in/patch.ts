@@ -1,14 +1,10 @@
-// FEAT-001 — anonymous sign-in and its user/JWT flags.
-// User creation and session creation remain separate writes.
-// JWT helpers stay local so this feature can be applied independently.
+// FEAT-001: anonymous sign-in and user/JWT flags. Helpers stay local for independent application.
 import { methodNamed, moduleFunctionWithText, wrapMethod } from '../../lib/patcher.ts'
 
 export const id = 'FEAT-001'
 export const title = 'anonymous sign-in'
 
-// Two of the three refusal tests are deliberately absent: the published build refuses in the same
-// words, so they must not diverge — they guard against this patch opening a hole. The third is
-// declared, because this patch changes which gate answers first when both are closed.
+// Single-gate refusals already match upstream. Only their priority when both are closed changes.
 export const expectedDivergence = [
    'FEAT-001 anonymous sign-in',
    'FEAT-001 anonymous sign-in > a signup with no credentials returns a session',
@@ -25,9 +21,7 @@ export const expectedDivergence = [
    'FEAT-001 anonymous sign-in > an anonymous user cannot claim an address that is taken',
 ]
 
-// The library's own refusal, so its status and wording stay the library's. Bound in every splice
-// rather than only the one that throws it, since the patcher carries a file's other top-level
-// declarations along with whichever function it inserts.
+// Bind the library's refusal in every splice: each one also carries this file's helpers.
 const refusal = { bind: { anonymousProviderDisabled: moduleFunctionWithText('anonymous_provider_disabled') } }
 
 export function apply(source: string): string {

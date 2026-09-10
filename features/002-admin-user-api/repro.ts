@@ -1,14 +1,5 @@
-// FEAT-002 — the core admin users API.  Listed as planned, effort M, in the package's own FEATURES.md.
-//
-// How a server-side process lists, reads, creates and deletes users without going through sign-up,
-// authenticating with a service_role JWT the way supabase-js does with a service key.
-//
-// Note what "absent" looks like: unmatched paths fall through to the dashboard, so the published
-// build answers /auth/v1/admin/users with 200 and the Studio's HTML. A caller checking only the
-// status code would think the route exists.
-//
-//   node repro.ts 002          ABSENT on the published bundle
-//   npm run install:patches    then run it again
+// Admin routes use a service_role JWT. The published build returns Studio HTML for absent routes.
+// Run: npm run repro -- admin-user-api
 import { newRawApp, get, post, req, JWT_SECRET, type LiteApp, type LiteConnection } from '../../test/harness.ts'
 import { SignJWT } from 'jose'
 // `process.exit` is needed here: on the published bundle the feature is absent, so the rest of the

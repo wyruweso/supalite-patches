@@ -97,9 +97,7 @@ describe('what the access token carries', () => {
       assert.equal(session.user.user_metadata.team, 'red')
 
       const claims = JSON.parse(Buffer.from(session.access_token.split('.')[1], 'base64url').toString())
-      // The seven claims the build issues, and no metadata among them — which is the subject here.
-      // Not an exact key set: a feature that adds a claim of its own (an assurance level, say) does
-      // not make this finding any less true, and pinning exclusivity would only make them collide.
+      // Check the missing metadata without excluding claims added by independent features.
       for (const claim of ['aud', 'email', 'exp', 'iat', 'role', 'session_id', 'sub']) {
          assert.ok(claim in claims, `missing claim: ${claim}`)
       }

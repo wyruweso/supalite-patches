@@ -332,10 +332,7 @@ async function recordFailedAttempt(connection: Connection, factorId: string, cha
    )
 }
 
-/**
- * `{}` for an absent body, `null` for anything that is not a JSON object. Read as text first, since
- * `json()` rejects the same way for an empty body and for a malformed one.
- */
+/** Read text to distinguish an absent body ({}) from malformed or non-object JSON (null). */
 async function readBody(c: HonoContext): Promise<Record<string, unknown> | null> {
    const text = (await c.req.text().catch(() => '')).trim()
    if (!text) return {}
@@ -356,8 +353,6 @@ async function findFactor(connection: Connection, id: string, userId: string) {
    return (result.rows ?? [])[0] ?? null
 }
 
-// --- TOTP ----------------------------------------------------------------------------------------
-//
 // TOTP (RFC 6238), with dynamic truncation from RFC 4226.
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'

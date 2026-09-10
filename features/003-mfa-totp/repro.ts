@@ -1,14 +1,5 @@
-// FEAT-003 — TOTP as a second factor.  Listed as planned, effort M, in the package's own FEATURES.md.
-//
-// enroll -> challenge -> verify, the three calls supabase.auth.mfa makes. The code is computed here
-// from RFC 6238 on node:crypto, independently of the patch — two implementations agreeing is what
-// makes it real TOTP rather than something six digits long.
-//
-// Verifying elevates the caller's own session to aal2 — in the database, so the level survives a
-// refresh — and ends their other sessions.
-//
-//   node repro.ts 003          ABSENT on the published bundle
-//   npm run install:patches    then run it again
+// Enroll, challenge, and verify with a TOTP code computed independently using node:crypto.
+// Run: npm run repro -- mfa-totp
 import { newApp, get, post, type LiteApp } from '../../test/harness.ts'
 import { createHmac } from 'node:crypto'
 // `process.exit` is needed here: on the published bundle the feature is absent, so the rest of the

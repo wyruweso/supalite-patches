@@ -71,17 +71,7 @@ describe('FIX-005 triggers survive a migration', () => {
       assert.deepEqual((await get(app, '/rest/v1/dst?select=name')).body, [{ name: 'rewritten' }])
    })
 
-   /**
-    * The case that loses a trigger entirely: a column change and a redefinition in one migration.
-    *
-    * SQLite drops a table's triggers with the table, so the original recreates them when rebuilding
-    * one. Deciding by name alone that it had "already planned" the create skipped the create and ran
-    * the drop anyway, leaving no trigger and a migration reporting success. The rule is what the
-    * original plans compared with what is wanted.
-    *
-    * Not declared as a divergence: a rebuild is the one path the published build gets right, and the
-    * regression this guards was this patch's own.
-    */
+   // The original rebuild already recreates this trigger. Do not drop it after that step.
    test('a redefined trigger survives a table rebuild', async () => {
       const { connection } = await migrate(withColumn('b int', 'first'))
       await (await connection.createMigrator(withColumn('b text', 'rebuilt'))).migrate({ force: true })
@@ -97,16 +87,7 @@ describe('FIX-005 triggers survive a migration', () => {
       )
    })
 
-   /**
-    * SQLite drops a table's own triggers with the table, but a trigger on *another* table that
-    * mentions it survives the drop — and the rebuild's `ALTER TABLE … RENAME` then validates the
-    * whole schema and fails:
-    *
-    *    error in trigger on_src_insert: no such table: main.dst
-    *
-    * The trigger sits on `src`; the table being rebuilt is `dst`. Nothing about the trigger changes,
-    * which is what makes it easy to miss: there is no trigger change for a diff to notice.
-    */
+   // The unchanged trigger belongs to src but references dst, the table being rebuilt.
    describe('a rebuild of a table a trigger writes to', () => {
       const crossTable = (dstColumn: string, withTrigger = true) =>
          [
@@ -149,15 +130,8 @@ describe('FIX-005 triggers survive a migration', () => {
       })
    })
 
-   /**
-    * Atomicity, asserted by breaking a migration rather than by reading the plan. `migratePlan`
-    * strips the plan's own transaction markers and runs every remaining statement inside one
-    * transaction of its own, so where a step sits relative to `COMMIT;` proves nothing — only a
-    * failure does.
-    *
-    * The failure is arranged after the trigger has been dropped: a NOT NULL column added to a table
-    * that already has rows, which the rebuild's copy refuses.
-    */
+   // Fail the row copy after dropping the trigger, then verify rollback restores it.
+   // migratePlan supplies the transaction; the plan's BEGIN/COMMIT markers alone prove nothing.
    test('a failed migration takes the trigger changes back with it', async () => {
       const withRequired = COPY.replace(
          'CREATE TABLE dst (id int primary key, name text);',
@@ -189,11 +163,7 @@ describe('FIX-005 triggers survive a migration', () => {
       )
    })
 
-   /**
-    * The difference a whitespace-collapsing comparison would miss: two spaces inside a string literal
-    * are data, not formatting. Getting it wrong is silent — the trigger keeps its old definition for
-    * ever and the migration reports success.
-    */
+   // Whitespace inside a string literal must remain significant when comparing triggers.
    test('a redefinition inside a string literal is noticed', async () => {
       const { connection } = await migrate(withBody("INSERT INTO public.dst (id, name) VALUES (NEW.id, 'a  b');"))
       await (
@@ -205,10 +175,6 @@ describe('FIX-005 triggers survive a migration', () => {
       assert.doesNotMatch(trigger.sql, /'a {2}b'/)
    })
 
-   /**
-    * Migrating the same schema twice must plan nothing, which is what makes an exact comparison safe:
-    * both sides come from the same generator, so a trigger compares byte for byte with itself.
-    */
    test('the same schema twice plans no trigger work', async () => {
       const { connection } = await migrate(COPY)
       const { plan } = await (await connection.createMigrator(COPY)).diff()
@@ -219,17 +185,7 @@ describe('FIX-005 triggers survive a migration', () => {
       assert.deepEqual(churn, [], 'an unchanged trigger was recreated')
    })
 
-   /**
-    * A trigger name needing quotes never reaches this patch, on either build.
-    *
-    * The drop it emits quotes the name and doubles an embedded quote, as SQLite requires and the name
-    * reader assumes — but it cannot be shown end to end, because the translator loses the quotes
-    * first: `CREATE TRIGGER "on src"` comes out as `CREATE TRIGGER on src` and is refused. A separate
-    * defect in a component this patch does not touch.
-    *
-    * Pinned as the refusal it actually is, marking the boundary of the claim, so the quoting is ready
-    * if the translator is ever fixed. Not a divergence: both builds fail identically.
-    */
+   // The translator loses quotes before this patch runs, so both builds reject these names.
    test('a trigger name needing quotes is refused by the translator, on both builds', async () => {
       const quoted = [
          TABLES,

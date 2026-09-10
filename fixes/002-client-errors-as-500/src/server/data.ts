@@ -19,11 +19,8 @@ interface PostgrestErrorContext {
 const CHECK_VIOLATION = 275
 
 /**
- * Two refusals that never reach the right branch of the ladder below.
- *
- * The constraint violations are not handled here: they are given their SQLSTATE in
- * `SqliteConnection.normalizeDbError`, which this mapper calls, so the ladder's own `23505`, `23503`
- * and `23502` branches answer them. What is left is the two cases the ladder has no branch for.
+ * Handle RLS and inline CHECK refusals missing from the original mapper.
+ * Other constraints use its existing SQLSTATE branches.
  */
 export function handlePostgrestError(err: unknown, ctx: PostgrestErrorContext): Response {
    const refusal = responseForMissingRlsPolicy(err, ctx)
@@ -36,15 +33,8 @@ export function handlePostgrestError(err: unknown, ctx: PostgrestErrorContext): 
 }
 
 /**
- * RLS denies by command, so a table with only a `FOR SELECT` policy correctly refuses an insert —
- * but that refusal raised a bare `Error('RLS policy violation')`, which is not a database error and
- * reaches no branch at all.
- *
- * `42501` is what Postgres raises for insufficient privilege and what PostgREST and hosted Supabase
- * return. The neighbouring `WITH CHECK` branch answers `PGRST301`, a code reserved for an
- * unverifiable JWT, so this deliberately does not match its neighbour: clients written against
- * Supabase read the real codes. The neighbour is left alone — it is not a 500, so not this patch's
- * defect, and the tests pin it unchanged.
+ * A missing command policy raises a plain Error. Return SQLSTATE 42501.
+ * The separate WITH CHECK branch keeps its existing PGRST301 response.
  */
 function responseForMissingRlsPolicy(err: unknown, ctx: PostgrestErrorContext): Response | null {
    if (!(err instanceof Error) || err.message !== 'RLS policy violation') return null
@@ -61,15 +51,7 @@ function responseForMissingRlsPolicy(err: unknown, ctx: PostgrestErrorContext): 
    )
 }
 
-/**
- * An inline `CHECK` violation, which normalises to `23514` — a SQLSTATE the ladder has no branch
- * for, so it would fall through to the `500 SUP` tail. A *named* CHECK is raised as its own class
- * higher up and already answers 400, which is why this looked like one missing code rather than a
- * whole conversion step that never fired.
- *
- * Matched on SQLite's numeric code, not on the message, so an error someone else has already formed
- * cannot be captured by wording alone.
- */
+/** Match inline CHECK failures by numeric code. Named CHECK errors already have a response. */
 function responseForCheckViolation(err: unknown): Response | null {
    if (errcodeOf(err) !== CHECK_VIOLATION) return null
 

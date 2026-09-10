@@ -118,10 +118,7 @@ export async function createRefreshResponse(
    )
 }
 
-/**
- * Email verification has already updated the identity and user metadata.
- * Clear the anonymous flag before creating the session. This build supports email conversion only.
- */
+/** Email verification already updates the identity. Clear the anonymous flag before issuing its session. */
 async function markVerifiedAnonymousUserAsPermanent(
    service: AuthService,
    user: UserRow,

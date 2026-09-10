@@ -39,11 +39,7 @@ function totp(secret: string, step = Math.floor(Date.now() / 1000 / 30)): string
 
 const claimsOf = (token: string) => JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
 
-/**
- * A code this secret does not accept, right now. A fixed `'000000'` would not do: with the skew
- * allowance three of the million codes are live at any instant, so it fails one run in three hundred
- * thousand — rare enough to be dismissed as flake.
- */
+// Choose a code outside the accepted time window; a fixed wrong code could occasionally be valid.
 function wrongCode(secret: string): string {
    const step = Math.floor(Date.now() / 1000 / 30)
    const live = new Set([totp(secret, step - 1), totp(secret, step), totp(secret, step + 1)])
@@ -248,9 +244,7 @@ describe('FEAT-003 TOTP second factor', () => {
       const claims = claimsOf(elevated.body.access_token)
       assert.equal(claims.aal, 'aal2')
 
-      // `amr` is the session's authentication history, handed back as currentAuthenticationMethods.
-      // Verifying adds to it: replacing the list would tell a caller they never entered a password.
-      // Most recent first, as Supabase documents — a policy reading amr[0] asks what happened last.
+      // Keep the authentication history, most recent method first; verifying must not erase password use.
       assert.deepEqual(
          claims.amr.map((entry: { method: string }) => entry.method),
          ['totp', 'password'],
@@ -288,9 +282,7 @@ describe('FEAT-003 TOTP second factor', () => {
       assert.equal(again.status, 422)
       assert.equal(again.body.error_code, 'mfa_factor_name_conflict')
 
-      // A different name is fine, and so are two blank ones: a blank name indexes as NULL, and NULL
-      // does not collide. That is upstream's `WHERE trim(friendly_name) <> ''` without a partial
-      // index, so this does not quietly depend on FIX-001.
+      // NULLIF allows repeated empty names without depending on FIX-001.
       for (const friendly_name of ['Tablet', '']) {
          const r = await post(u.app, '/auth/v1/factors', { factor_type: 'totp', friendly_name }, u.auth)
          assert.equal(r.status, 200, `${JSON.stringify(friendly_name)}: ${JSON.stringify(r.body).slice(0, 80)}`)
@@ -436,9 +428,7 @@ describe('FEAT-003 TOTP second factor', () => {
          claims.amr.map((entry: { method: string }) => entry.method),
          ['totp', 'password'],
       )
-      // FEAT-001's claim on a session FEAT-003 elevated: neither wrapper erased the other's work.
-      // Only asserted when that patch is installed too — this test describes the pair, and each of
-      // them has to pass its own suite alone.
+      // Check the combined JWT claims only when FEAT-001 is also installed.
       if ('is_anonymous' in claims) assert.equal(claims.is_anonymous, false)
    })
 
@@ -451,11 +441,7 @@ describe('FEAT-003 TOTP second factor', () => {
       assert.equal(row.secret, factor.totp.secret)
    })
 
-   /**
-    * The escalation these routes exist to prevent. Without an assurance check, a session holding only
-    * the password can add a factor of its own, verify it, and reach aal2 — the account's real factor
-    * never used, and every RLS policy keyed on `aal = 'aal2'` satisfied.
-    */
+   // A password-only session must use an existing verified factor before adding another.
    describe('a further factor needs the existing one', () => {
       const passwordOnlySession = async (u: Enrolled) => {
          const again = (
@@ -606,11 +592,7 @@ describe('FEAT-003 TOTP second factor', () => {
       }
    })
 
-   /**
-    * A challenge and an OTP are each good once, and the guarantee has to hold when two requests arrive
-    * together — the reason both are spent by the statement that verifies rather than by a read
-    * followed by a write.
-    */
+   // Consume the challenge and OTP step atomically, including concurrent requests.
    describe('one use each', () => {
       test('two concurrent verifications with one challenge: exactly one succeeds', async () => {
          const u = await newUser()
@@ -659,10 +641,7 @@ describe('FEAT-003 TOTP second factor', () => {
       })
    })
 
-   /**
-    * Ending the other sessions is about tokens that never passed the factor. A device that has passed
-    * it keeps its session: logging it out is a punishment for authenticating properly.
-    */
+   // Revoke other AAL1 sessions; preserve sessions that already passed MFA.
    test('a session that already passed MFA is left alone', async () => {
       const first = await newUser()
       const factor = await enroll(first)

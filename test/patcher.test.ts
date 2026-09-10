@@ -1,8 +1,4 @@
-// The patcher's own guards, on a bundle small enough to read.
-//
-// Every other test here asks whether a patch behaves correctly. These ask whether the machinery
-// refuses what it cannot do safely, which end-to-end testing never shows: a guard that never fires
-// and a guard that does not exist look identical.
+// Small synthetic bundles exercise rejection paths that successful end-to-end patching cannot cover.
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFileSync, mkdtempSync } from 'node:fs'
@@ -73,9 +69,7 @@ describe('patcher guards', () => {
       assert.throws(() => applyTo('export function describeColumn(name: string) { return name }'), /parameters/)
    })
 
-   // The other bindings read a name off a call the target function makes. An error factory is called
-   // from everywhere and nowhere in particular, so it is found by its message — and the name that
-   // comes back has to be the one it is bound to, not the one it is called by.
+   // Find the error factory's declaration across the program, even without a call in the target.
    test('an error factory is found by its message, through the whole program', () => {
       const bundle =
          'var ct=()=>new $(400,"invalid_credentials","Invalid login credentials");' +

@@ -373,7 +373,11 @@ describe('the version argument the adapter is handed', () => {
             },
             async deleteObject() {},
             async deleteObjects() {},
-            async copyObject() {
+            async copyObject(bucket: string, source: string, version: string | undefined, destination: string) {
+               seen.push({ call: 'copyObject', version })
+               const bytes = store.get(keyOf(bucket, source, version))
+               if (!bytes) throw missing()
+               store.set(keyOf(bucket, destination, version), bytes)
                return { httpStatusCode: 200 }
             },
             async privateAssetUrl() {
@@ -408,6 +412,22 @@ describe('the version argument the adapter is handed', () => {
 
       const download = await get(app, '/storage/v1/object/b/a.txt', auth)
       assert.equal(download.status, 500)
+      assert.deepEqual(keys(), ['b/a.txt@none'])
+   })
+
+   test('copy also uses the row version rather than the version passed to upload', async () => {
+      const { app, auth, seen, keys } = await withVersionKeyedAdapter()
+      assert.equal((await post(app, '/storage/v1/object/b/a.txt', filePart('a.txt', 'hello'), auth)).status, 200)
+
+      const copied = await post(
+         app,
+         '/storage/v1/object/copy',
+         { bucketId: 'b', sourceKey: 'a.txt', destinationKey: 'copy.txt' },
+         auth,
+      )
+      assert.equal(copied.status, 500)
+      assert.equal(seen.find((call) => call.call === 'uploadObject')?.version, undefined)
+      assert.match(String(seen.find((call) => call.call === 'copyObject')?.version), /^[0-9a-f-]{36}$/)
       assert.deepEqual(keys(), ['b/a.txt@none'])
    })
 })

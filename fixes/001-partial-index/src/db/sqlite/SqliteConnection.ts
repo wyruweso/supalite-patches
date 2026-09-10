@@ -40,13 +40,8 @@ export async function introspect(
 }
 
 /**
- * Pulls the predicate out of `CREATE [UNIQUE] INDEX name ON table (…) WHERE …`.
- *
- * The filter's `WHERE` has to be told apart from any other, and there are two ways to meet one that
- * is not it: inside quoted text or a comment, and inside the words before the indexed expressions —
- * `CREATE INDEX індексWHERE ON t (a)` names an index, not a predicate. So the filter is only looked
- * for after the list of indexed expressions has closed, and quoted runs and comments are skipped
- * whole. Not a parser: it only needs to know where it is, not what it is reading.
+ * Find WHERE after the indexed expressions, skipping quotes and comments.
+ * Earlier occurrences may be part of an identifier such as індексWHERE.
  */
 function extractIndexPredicate(sql: string | null): string | null {
    if (!sql) return null

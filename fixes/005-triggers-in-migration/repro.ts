@@ -1,11 +1,5 @@
-// FIX-005 — triggers never reach the database through the migrator.  FINDINGS #8
-//
-// The translation is correct and the trigger works when the translated DDL is executed directly; the
-// migrator is the path that loses it. Differ.diff returns {tables, columns, indexes, foreign_keys,
-// has_changes} — no `triggers` key, so a new trigger never becomes a plan step.
-//
-//   node repro.ts 005          on the published bundle, so the defect shows
-//   npm run install:patches    then run it again
+// The translator emits triggers, but the migrator ignores standalone trigger changes.
+// Run: npm run repro -- triggers-in-migration
 import { newApp, type LiteConnection } from '../../test/harness.ts'
 
 // The library logs every error it handles, stack trace included, which would bury a short report.

@@ -29,24 +29,13 @@ describe('FIX-004 publication statements do not reach the DDL', () => {
       assert.equal((await translate('CREATE PUBLICATION supabase_realtime FOR TABLE messages;')).trim(), '')
    })
 
-   /**
-    * The third statement of the family, failing differently: `DROP PUBLICATION` has no node type of
-    * its own — an ordinary DropStmt with `removeType: 'OBJECT_PUBLICATION'` — so the deparser throws
-    * rather than mangling it.
-    */
+   // DROP PUBLICATION shares DropStmt with other object types.
    test('DROP PUBLICATION translates to nothing', async () => {
       assert.equal((await translate('DROP PUBLICATION supabase_realtime;')).trim(), '')
       assert.equal((await translate('DROP PUBLICATION IF EXISTS supabase_realtime;')).trim(), '')
    })
 
-   /**
-    * What it is for: Supabase's own documented block for turning Realtime on, shape for shape. Every
-    * publication statement in the family appears in it, which is why this is the test that matters —
-    * before this, a schema exported from a project using Realtime failed on its first line.
-    *
-    * It succeeds by being ignored rather than implemented: SQLite has no logical replication to
-    * translate publications into. What must happen is the ordinary table beside them being created.
-    */
+   // Publications are skipped; the ordinary table in the same schema must still be created.
    test('the canonical Supabase Realtime block migrates, and the table beside it is created', async () => {
       const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
       const ddl = [
@@ -76,11 +65,7 @@ describe('FIX-004 publication statements do not reach the DDL', () => {
       assert.match(out, /name TEXT/)
    })
 
-   /**
-    * The guard that matters here. `DROP PUBLICATION` is recognised by a field of a node type shared
-    * with the drops that carry real meaning, so the risk is not missing something but taking the
-    * whole family along. These must still translate, and a refused drop must still be refused.
-    */
+   // Other objects sharing DropStmt must retain their translation or rejection behavior.
    test('other drops still translate, and an unsupported one is still refused', async () => {
       assert.match(await translate('DROP TABLE t;'), /DROP TABLE t/)
       assert.match(await translate('DROP INDEX i;'), /DROP INDEX i/)
@@ -95,11 +80,6 @@ describe('FIX-004 publication statements do not reach the DDL', () => {
       await assert.rejects(() => translate('ALTER TYPE mood RENAME TO feeling;'), /not supported in SQLite/)
    })
 
-   /**
-    * Changing only the publication is not a schema change: the plan is empty and the rows that were
-    * there are still there. The statements are dropped in translation, so there is nothing for the
-    * differ to see — which is the property that makes ignoring them safe rather than merely quiet.
-    */
    test('changing only the publication plans nothing and keeps the rows', async () => {
       const { connection }: { connection: LiteConnection } = await newApp({ seed: false })
       const table = 'CREATE TABLE messages (id int primary key, body text);\n'

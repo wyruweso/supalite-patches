@@ -1,54 +1,48 @@
-// Applies every patch to the installed @supabase/lite, so the patched library can be used from an
-// ordinary `import '@supabase/lite'`.
-//
-//   npm run install:patches
-//   npm run uninstall:patches
-//
-// The original is kept beside it as index.published.js, so rolling back needs no reinstall. Running
-// twice is safe: patches are applied to the backup, never to an already-patched file.
+// Install patches in node_modules; keep index.published.js for restoration.
 import { BUNDLE, buildPatchedBundle, SUPPORTED } from './apply.ts'
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-const INSTALLED = join(HERE, 'node_modules', '@supabase', 'lite')
+const PROJECT_DIR = dirname(fileURLToPath(import.meta.url))
+const PACKAGE_DIR = join(PROJECT_DIR, 'node_modules', '@supabase', 'lite')
 
-const target = join(INSTALLED, 'dist', BUNDLE)
-const backup = join(INSTALLED, 'dist', 'index.published.js')
+const installedBundle = join(PACKAGE_DIR, 'dist', BUNDLE)
+const publishedBackup = join(PACKAGE_DIR, 'dist', 'index.published.js')
 
 async function install(): Promise<void> {
+   // Always build from the published bundle, including repeated installations.
    uninstall({ quiet: true })
 
-   const staging = mkdtempSync(join(tmpdir(), 'supalite-patches-'))
-   const applied = await buildPatchedBundle(staging)
+   const stagingDir = mkdtempSync(join(tmpdir(), 'supalite-patches-'))
+   const patches = await buildPatchedBundle(stagingDir)
 
-   copyFileSync(target, backup)
-   copyFileSync(join(staging, BUNDLE), target)
-   rmSync(staging, { recursive: true, force: true })
+   copyFileSync(installedBundle, publishedBackup)
+   copyFileSync(join(stagingDir, BUNDLE), installedBundle)
+   rmSync(stagingDir, { recursive: true, force: true })
 
-   console.log(`@supabase/lite patched, ${applied.length} patches:`)
-   for (const patch of applied) console.log(`  ${patch.id.padEnd(9)} ${patch.title}`)
+   console.log(`@supabase/lite patched, ${patches.length} patches:`)
+   for (const patch of patches) console.log(`  ${patch.id.padEnd(9)} ${patch.title}`)
    console.log('\nroll back: npm run uninstall:patches')
 }
 
 function uninstall({ quiet = false } = {}): void {
-   if (!existsSync(backup)) {
+   if (!existsSync(publishedBackup)) {
       if (!quiet) console.log('no patches installed')
       return
    }
-   copyFileSync(backup, target)
-   rmSync(backup, { force: true })
+   copyFileSync(publishedBackup, installedBundle)
+   rmSync(publishedBackup, { force: true })
    if (!quiet) console.log('published bundle restored')
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-   if (!existsSync(join(INSTALLED, 'package.json'))) {
-      console.error(`package not found: ${INSTALLED} — run \`npm i\` first`)
+   if (!existsSync(join(PACKAGE_DIR, 'package.json'))) {
+      console.error(`package not found: ${PACKAGE_DIR} — run \`npm ci\` first`)
       process.exit(2)
    }
-   const version = (JSON.parse(readFileSync(join(INSTALLED, 'package.json'), 'utf8')) as { version: string }).version
+   const { version } = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8')) as { version: string }
    if (!SUPPORTED.includes(version)) {
       console.error(`patches are verified against @supabase/lite@${SUPPORTED.join(', ')}; ${version} is installed`)
       process.exit(2)

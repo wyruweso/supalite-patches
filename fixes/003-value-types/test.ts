@@ -49,11 +49,7 @@ describe('FIX-003 values come back in their Postgres types', () => {
       assert.deepEqual(read, sent)
    })
 
-   /**
-    * The declared types are read from the metadata gathered during translation, not inferred from the
-    * schema SQLite kept — so nothing an integer column happens to sit near can change its type. Each
-    * of these three came back as `true` while the type was being guessed from CHECK text.
-    */
+   // Declared metadata must keep integers as integers, regardless of nearby CHECK expressions.
    describe('an integer column stays an integer', () => {
       const integerBesides = async (ddl: string, insert: Record<string, unknown>) => {
          const other: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
@@ -103,11 +99,7 @@ describe('FIX-003 values come back in their Postgres types', () => {
       })
    })
 
-   /**
-    * The same merge restores the schema a table was declared in, which the SQLite name has folded
-    * into `auth.users`. Asserted because `pins/system.test.ts` no longer can: the shape differs
-    * between the two builds, which is exactly this change.
-    */
+   // Metadata merging also restores the declared schema; pins/system.test.ts allows either shape.
    test('introspection reports a table under its own schema again', async () => {
       const { app: seeded }: { app: LiteApp } = await newApp()
       const tables = (await get(seeded, '/_system/introspect')).body.tables as { name: string; schema?: string }[]

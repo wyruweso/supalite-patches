@@ -1,11 +1,5 @@
-// FEAT-001 — anonymous sign-in.  Listed as planned, effort S, in the package's own FEATURES.md.
-//
-// supabase-js calls signInAnonymously() with the same request as an ordinary signup — POST
-// /auth/v1/signup — only without email and password. Supabase gates it behind its own config flag,
-// `enable_anonymous_sign_ins`, which defaults to off; this script turns it on.
-//
-//   node repro.ts 001          ABSENT on the published bundle
-//   npm run install:patches    then run it again
+// Anonymous signup uses POST /auth/v1/signup without credentials, with the config flag enabled.
+// Run: npm run repro -- anonymous-sign-in
 import { newRawApp, get, post, JWT_SECRET, type LiteApp, type LiteConnection } from '../../test/harness.ts'
 // `process.exit` is needed here: on the published bundle the feature is absent, so the rest of the
 // script would read fields that do not exist. The other reproductions drain their event loop alone.

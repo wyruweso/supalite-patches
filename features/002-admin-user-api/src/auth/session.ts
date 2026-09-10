@@ -20,10 +20,7 @@ interface AuthService {
 /** Reuse the library error factory so the response remains invalid_credentials/400. */
 declare function invalidCredentials(): Error
 
-/**
- * All initial sign-in flows meet here. Deleted refresh tokens already prevent refresh.
- * Previously issued access tokens retain the separate behavior covered in test.ts.
- */
+/** All initial sign-in flows meet here; deleting sessions and refresh tokens already prevents refresh. */
 export async function createSessionForUser(
    this: AuthService,
    user: UserRow,

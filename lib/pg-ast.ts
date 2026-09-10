@@ -1,7 +1,4 @@
-// Minimal Postgres AST node types — only the fields the patches touch.
-//
-// The field names match what the parser produces, which is also what survived minification: they are
-// libpg_query data, not identifiers.
+// Minimal libpg_query node shapes. Parser field names survive minification.
 
 /** An opaque expression node: NullTest, A_Expr, BoolExpr and the rest. */
 export type PgNode = Record<string, unknown>

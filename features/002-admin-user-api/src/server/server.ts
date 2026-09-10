@@ -261,10 +261,7 @@ async function createUser(c: HonoContext): Promise<Response> {
    return c.json(await toAdminUserResponse(c, created ?? user), 200)
 }
 
-/**
- * Soft deletion retains the user id and replaces login identifiers with digests.
- * Return 200 {} as expected by supabase-js.
- */
+/** Soft deletion retains the id and replaces login identifiers with digests. Return 200 {} for the SDK. */
 async function deleteUser(c: HonoContext): Promise<Response> {
    if (!isAdmin(c)) return forbidden(c)
 
@@ -340,10 +337,7 @@ async function tableIsQueryable(repo: Repo, table: string): Promise<boolean> {
    }
 }
 
-/**
- * Use GoTrue's identifier digests: base64url(sha256(user id + identifier)),
- * with phone digests truncated to 15 characters.
- */
+/** GoTrue digests: base64url(sha256(user id + identifier)); phone digests use the first 15 characters. */
 async function obfuscateIdentifiers(
    user: UserRow,
    identities: { provider?: string; provider_id?: string }[],

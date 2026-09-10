@@ -1,6 +1,5 @@
-// FEAT-003 — TOTP enrollment, verification, factor listing, and session claims.
-// Extends the auth DDL and upgrades existing MFA tables during ensureSystemSchema.
-// JWT helpers stay local so this feature can be applied independently.
+// FEAT-003: TOTP routes, factors, and session claims.
+// Extends the auth schema and upgrades existing MFA tables; helpers stay local.
 import {
    appendToConstant,
    argumentOfCall,

@@ -1,6 +1,5 @@
-// FEAT-002 — list, get, create, and delete users through the admin API.
-// Adds routes before authRoutes is mounted and rejects deleted users at session creation.
-// The storage mount identifies createApp; /auth/v1 also occurs in the OAuth callback builder.
+// FEAT-002: admin user routes and refusal of new sessions for deleted users.
+// The storage mount identifies createApp; /auth/v1 also occurs in the OAuth builder.
 import {
    argumentOfCall,
    functionWithText,
@@ -13,9 +12,7 @@ import {
 export const id = 'FEAT-002'
 export const title = 'core admin users API: list, get, create, delete'
 
-// `an unauthenticated request never reaches the handler` is deliberately absent: the middleware
-// refuses on both builds, so it must not diverge. It guards that the routes inherit the chain rather
-// than carrying their own idea of who may call them.
+// Unauthenticated requests are refused by the existing middleware on both builds.
 export const expectedDivergence = [
    'FEAT-002 admin user API',
    'FEAT-002 admin user API > listing users returns them',
@@ -66,12 +63,8 @@ export function apply(source: string): string {
       bind: { authRoutes: argumentOfCall('/auth/v1', 1) },
    })
 
-   // Every flow creating an initial authenticated session converges here — password, signup,
-   // verifyOtp, magic link, recovery, OAuth, PKCE — so this is the one place to turn a deleted user
-   // away. Refresh needs no guard: the delete takes its token and session row with it.
-   //
-   // `invalidCredentials` is the library's own error factory, found by the message only it carries.
-   // Raising anything else would leave a 500 where a 400 belongs.
+   // All initial sign-in flows reach this method. Deleted session rows already prevent refresh.
+   // Use the library's invalidCredentials error to retain its response format.
    return wrapMethod(routed, {
       at: methodNamed('createSessionForUser', 'assertPasswordStrong'),
       replacement: session,

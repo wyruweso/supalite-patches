@@ -17,9 +17,7 @@ import {
 
 const claimsOf = (token: string) => JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
 
-// An administrator presents an ordinary JWT with the `service_role` role, signed with the project
-// secret — what supabase-js does with a service key. `sub` must be a real UUID: the zero UUID with
-// this role is refused separately.
+// Admin JWTs use service_role and a real UUID; the nil UUID is refused separately.
 async function serviceToken(): Promise<Record<string, string>> {
    const token = await new SignJWT({ sub: crypto.randomUUID(), role: 'service_role', aud: 'authenticated' })
       .setProtectedHeader({ alg: 'HS256' })
@@ -293,9 +291,7 @@ describe('FEAT-002 admin user API', () => {
       assert.deepEqual(await rows(fresh.connection, 'SELECT token FROM "auth.refresh_tokens"'), [])
    })
 
-   // supabase-js sends `{ should_soft_delete }`. Upstream keeps the row and its id, replaces the
-   // identifiers with a digest, clears the password, empties both metadata objects and the identity
-   // data, and deletes the factors outright.
+   // The SDK sends should_soft_delete. Keep the row and id; clear credentials, metadata, and factors.
    test('a soft delete empties the user and unnames them', async () => {
       const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
       const session = (
@@ -352,12 +348,7 @@ describe('FEAT-002 admin user API', () => {
       assert.notEqual(signedIn.status, 200)
    })
 
-   /**
-    * A soft delete claims the user cannot sign in. The identifiers no longer name the row, so the
-    * passwordless paths cannot reach it — but they are exercised anyway, because a code delivered to
-    * an address that is now free is a different matter from one delivered to a deleted user. What
-    * must hold either way: nothing authenticates as that id.
-    */
+   // Passwordless flows may create a new account for the freed address, but must not revive the old id.
    test('a soft-deleted user cannot sign in by any path this build offers', async () => {
       const { app: fresh, connection, mail } = await newAppWithMailbox()
       const email = 'revoked@b.co'
@@ -391,20 +382,8 @@ describe('FEAT-002 admin user API', () => {
       assert.equal(direct.status, 200)
    })
 
-   /**
-    * The token already issued, which the guard on session creation says nothing about.
-    *
-    * The auth API revokes it at once, and not through this patch: the middleware loads the session
-    * named by `session_id` and refuses when it is gone, so deleting the row ends the token. Worth a
-    * test precisely because it is somebody else's behaviour — a build that stopped checking the
-    * session would take this claim with it unnoticed.
-    *
-    * The Data API does not revoke. PostgREST validates the signature and expiry and asks nobody about
-    * sessions, so `auth.uid()` keeps resolving to a deleted user until the token expires — upstream
-    * Supabase's behaviour too, but the limit of what a soft delete buys, so it is asserted rather
-    * than left to be discovered. The exposure is bounded by the token's lifetime and closed by no new
-    * one being mintable.
-    */
+   // Auth checks the deleted session and refuses its token immediately.
+   // The Data API validates the JWT without consulting sessions, so it accepts it until expiry.
    test('a stale access token dies on the auth API and outlives the delete on the data API', async () => {
       const { app: fresh, connection: db }: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
       await (
@@ -448,11 +427,7 @@ describe('FEAT-002 admin user API', () => {
       assert.equal(read.body.length, 1, 'RLS stopped resolving auth.uid() for the deleted user')
    })
 
-   /**
-    * `password_hash` exists for moving accounts in from another system, and nothing downstream looks
-    * at it again: bcrypt's compare answers "no" to a malformed digest just as to a wrong password. An
-    * unchecked hash does not fail — it creates a user who can never sign in and is never told why.
-    */
+   // bcrypt treats malformed hashes like wrong passwords. Reject them before creating an unusable account.
    test('a password_hash that is not a bcrypt hash is refused', async () => {
       for (const hash of ['not-a-hash', '$2a$10$tooshort', '$1$abc$xyz', '$2a$10$' + 'a'.repeat(52)]) {
          const r = await post(
@@ -505,11 +480,7 @@ describe('FEAT-002 admin user API', () => {
       assert.equal(r.body.error_code, 'not_admin')
    })
 
-   /**
-    * Input read strictly, because the lenient reading of each of these was a wrong answer rather than
-    * a rough one: a mistyped delete flag removed the user irreversibly, and a page that is not a whole
-    * number reached the database as an OFFSET and came back a 500.
-    */
+   // Reject mistyped delete flags and fractional pagination before any write or query.
    describe('malformed input is refused before anything happens', () => {
       test('a should_soft_delete that is not a boolean is a 400, and keeps the user', async () => {
          const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
@@ -554,11 +525,7 @@ describe('FEAT-002 admin user API', () => {
       assert.ok(row.phone_confirmed_at, 'phone_confirm was accepted and dropped')
    })
 
-   /**
-    * The generated password has to satisfy the configured policy, or the route refuses its own
-    * credential — after the row is written, leaving a user with no password and an address that now
-    * answers `email_exists`.
-    */
+   // Validate generated credentials before reserving the user's id and email.
    test('a minimum password length longer than the generator is still satisfied', async () => {
       const strict: { app: LiteApp; connection: LiteConnection } = await newRawApp({
          auth: {
@@ -576,13 +543,8 @@ describe('FEAT-002 admin user API', () => {
       assert.match(String(row.encrypted_password), /^\$2[aby]\$/, 'the user was left without a password')
    })
 
-   /**
-    * `role` is an ordinary admin field in GoTrue, and this route passes it through as upstream does.
-    * Pinned rather than restricted, because the consequence is sharper here than the field looks: in
-    * this build `service_role` bypasses RLS, so a user created with that role holds a password login
-    * that reads every table. An administrator can do that deliberately; nobody should do it by
-    * accident, and a change that started defaulting it would show up here.
-    */
+   // An explicit service_role is accepted for GoTrue parity and bypasses RLS at password sign-in.
+   // Keep that consequence explicit and verify authenticated remains the default.
    test('a role given at creation reaches the token, service_role included', async () => {
       const fresh: { app: LiteApp; connection: LiteConnection } = await newApp({ seed: false })
       await (

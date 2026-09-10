@@ -1,19 +1,4 @@
-// FIX-002 — client errors are reported as server faults.  FINDINGS #2, #3, #4
-//
-// Client refusals reached the catch-all tail of the error mapper and came back as 500 with code SUP
-// and a stringified Error — the fingerprint of an escaped exception. A caller cannot tell "you may
-// not" from "the server broke", so it retries a request that will never succeed.
-//
-//   WITH CHECK failed on an existing policy    403 PGRST301   (works; left alone)
-//   no policy for the command at all           500 SUP
-//   named CHECK violation                      400 23514      (works; left alone)
-//   inline CHECK violation                     500 SUP
-//   duplicate primary key, UNIQUE, NOT NULL,   500 SUP
-//   dangling foreign key
-//
-// Two edits, because there are two causes. The conversion of a driver error into an SQLSTATE reads
-// better-sqlite3's error shape while the shipped driver is `node:sqlite`, so the ladder's own
-// constraint branches never fire; and two refusals have no branch to reach even once coded.
+// FIX-002: map node:sqlite constraint codes to SQLSTATE, then handle uncaught RLS and CHECK errors.
 import { functionWithText, methodNamed, soleCalleeWithArity, wrapFunction, wrapMethod } from '../../lib/patcher.ts'
 
 export const id = 'FIX-002'

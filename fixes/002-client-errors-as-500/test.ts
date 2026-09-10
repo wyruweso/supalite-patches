@@ -35,14 +35,7 @@ describe('FIX-002 client errors are not reported as server faults', () => {
       typedApp = b.app
    })
 
-   /**
-    * RLS denies per command: a table with only a FOR SELECT policy permits no inserts. The refusal
-    * was correct and the row was not written — only its status was wrong.
-    *
-    * `42501` is Postgres's insufficient_privilege, what PostgREST and hosted Supabase answer a policy
-    * refusal with. The neighbouring WITH CHECK path answers PGRST301 ("the JWT did not verify") and
-    * keeps doing so: pinned two tests below, since it is not a 500 and so not this patch's to change.
-    */
+   // The policy correctly blocks the insert; only the response changes to SQLSTATE 42501.
    test('an insert refused for want of a policy is a 42501, not a 500', async () => {
       const r = await post(rlsApp, '/rest/v1/readonly_notes', { id: 1, body: 'x' }, alice)
       assert.equal(r.status, 403)
@@ -97,12 +90,7 @@ describe('FIX-002 client errors are not reported as server faults', () => {
       assert.equal(pgrstCode(r), '23502')
    })
 
-   /**
-    * The conversion itself, called directly, because the priority it gives is the whole point: a
-    * numeric SQLite code is read, a message never is. An error someone else has already formed —
-    * carrying its own code, detail and hint — must come back untouched even when its wording is
-    * exactly that of a constraint violation.
-    */
+   // Numeric driver codes take precedence; messages alone must not reclassify a formed error.
    describe('normalizeDbError', () => {
       let normalise: (err: unknown) => { code?: string; detail?: string; hint?: string; message?: string }
 
@@ -151,14 +139,7 @@ describe('FIX-002 client errors are not reported as server faults', () => {
       assert.equal(r.status, 201, `PGRST code: ${pgrstCode(r)}`)
    })
 
-   /**
-    * The working neighbours, asserted on the whole body rather than a status and a code, because both
-    * answer 400/23514 and only the rest of the body shows which branch replied. A named CHECK is
-    * raised by the library before SQLite sees the row, so it carries no numeric code and the wrapper
-    * passes it through; the original keeps naming the constraint in `details`.
-    *
-    * Guards, not fixes: these must not diverge, which is why neither is declared.
-    */
+   // Compare the whole response: the named CHECK path must retain its constraint details.
    test('a named CHECK violation is unchanged', async () => {
       const r = await post(typedApp, '/rest/v1/items', { id: 4, nums: 'not-an-array' }, REPRESENT)
       assert.equal(r.status, 400)
@@ -170,12 +151,7 @@ describe('FIX-002 client errors are not reported as server faults', () => {
       })
    })
 
-   /**
-    * The other working neighbour: a policy that exists whose WITH CHECK fails — the path the broken
-    * one was diagnosed against, so it has to be shown untouched, PGRST301 included, while the
-    * refusal this patch fixes now answers 42501. The disagreement is deliberate: upstream's shape
-    * restored on one path, not this build's shape spread to both.
-    */
+   // The existing WITH CHECK path keeps PGRST301 on both builds.
    test('a WITH CHECK refusal on an existing policy is unchanged', async () => {
       const mine = '00000000-0000-0000-0000-000000000001'
 

@@ -1,12 +1,5 @@
-// FIX-004 — publication statements kill the migration, in two different ways.  FINDINGS #7
-//
-// No SQLite equivalent, so these should be dropped (as GRANT and COMMENT ON are) or refused by name
-// (as REVOKE and REPLICA IDENTITY are). Instead ALTER is mangled — the deparser prints its own
-// `FOR TABLE` and keeps the original `TABLE` — and DROP PUBLICATION is refused outright, so the
-// block Supabase documents for enabling Realtime fails on its first line.
-//
-//   node repro.ts 004          on the published bundle, so the defect shows
-//   npm run install:patches    then run it again
+// Publication statements must not prevent the tables beside them from migrating.
+// Run: npm run repro -- publication-statements
 import { newApp, type LiteConnection } from '../../test/harness.ts'
 
 // The library logs every error it handles, stack trace included, which would bury a short report.
@@ -31,9 +24,7 @@ try {
    show('the migration', `FAILED: ${(e as Error).message.slice(0, 60)}`)
 }
 
-// Supabase's own documented block for turning Realtime on. It opens with the DROP, which fails a
-// different way — sharing a node type with DROP TABLE, it is refused by name rather than mangled —
-// so this dies before ever reaching the ALTER above.
+// The Supabase Realtime setup block reaches DROP PUBLICATION before ALTER PUBLICATION.
 console.log()
 const REALTIME = `CREATE TABLE messages (id int primary key, body text);
 begin;
